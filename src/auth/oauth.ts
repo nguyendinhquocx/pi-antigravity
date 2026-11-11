@@ -27,11 +27,11 @@ export const SCOPES = [
 export const CLIENT_ID =
   antigravityEnv("CLIENT_ID") ||
   atob(
-    "MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlc" +
-      "C5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ==",
+    "NDMwODA3MTIxOTQwLW92cmxjaW44ajF0dHV0aG1tcGQwNTBjbjNsczc1MWtr" +
+      "LmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t",
   );
 export const CLIENT_SECRET =
-  antigravityEnv("CLIENT_SECRET") || atob("R09DU1BYLUs1OEZXUjQ" + "4NkxkTEoxbUxCOHNYQzR6NnFEQWY=");
+  antigravityEnv("CLIENT_SECRET") || atob("R09DU1BYLVZoc3A4WUc1" + "bmIwa2NOWXBoX1liNHh2UXBkSXE=");
 
 export const CALLBACK_HOST = resolveCallbackHost();
 
