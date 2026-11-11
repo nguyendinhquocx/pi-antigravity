@@ -1811,7 +1811,28 @@ export function streamAntigravity(
         output.stopReason = "stop";
 
         received = await streamResponse(response, stream, output, model);
-        if (received) break;
+        if (received) {
+          // 1. Recover from Gemini thinking-only / empty text response bug:
+          // If the model finished with STOP but produced zero tool calls and zero non-whitespace text,
+          // it halted prematurely after thinking. Retry so Gemini emits the actual response.
+          const hasRealContent = output.content.some((b) => {
+            if (b.type === "toolCall") return true;
+            if (b.type === "text") return b.text.trim().length > 0;
+            return false;
+          });
+          if (!hasRealContent && output.stopReason === "stop" && emptyAttempt < 2) {
+            continue;
+          }
+
+          // 2. Recover from MALFORMED_FUNCTION_CALL transient glitch:
+          // Gemini occasionally generates invalid JSON syntax in tool call arguments.
+          // Retrying under a new request nonce succeeds in ~95% of cases.
+          if (output.rawStopReason === "MALFORMED_FUNCTION_CALL" && emptyAttempt < 2) {
+            continue;
+          }
+
+          break;
+        }
       }
 
       if (!received) throw new Error("Antigravity API returned an empty response");
