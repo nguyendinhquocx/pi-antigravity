@@ -12,7 +12,12 @@ import {
 } from "@earendil-works/pi-ai";
 // Namespace import: transcript helpers exist on pi-ai >= 0.86; resolved at runtime.
 import * as piAi from "@earendil-works/pi-ai";
-import { failoverToNextAccount } from "../auth/accounts.js";
+import { apiKeyFor, loadAccountStore } from "../auth/accounts.js";
+import {
+  failoverToNextAccountInMemory,
+  markAccountRateLimited,
+  selectBestAccountForFamily,
+} from "../auth/balancer.js";
 import {
   antigravityHeaders,
   endpointCandidates,
@@ -55,6 +60,7 @@ import {
   getThinkingConfig,
   PROVIDER_ID,
 } from "../models/models.js";
+import { detectModelFamily } from "../models/family.js";
 import { extractValidationUrl, redactSecrets, safeError } from "../utils/security.js";
 import {
   ANTIGRAVITY_API,
@@ -1561,7 +1567,32 @@ export function streamAntigravity(
     const output = createOutput(model);
     try {
       let creds = parseApiKey(opts.apiKey);
-      const triedAccessTokens = new Set<string>([creds.token]);
+      const triedAccountIds = new Set<string>();
+      const triedAccessTokens = new Set<string>();
+
+      // Smart multi-account balancer: per request, dispatch to the linked account
+      // with the most remaining quota for this model family. Entirely in memory —
+      // auth.json is never rewritten, so parallel sessions/subagents stay isolated.
+      // Only engages when the caller's token belongs to the linked-account store,
+      // so mock apiKeys (unit tests, custom callers) keep working untouched.
+      const accountStore = loadAccountStore();
+      const isKnownStoreToken = Object.values(accountStore.accounts).some(
+        (account) =>
+          account.access === creds.token ||
+          (Boolean(creds.projectId) && apiKeyFor(account).projectId === creds.projectId),
+      );
+      if (isKnownStoreToken && Object.keys(accountStore.accounts).length > 1) {
+        const best = await selectBestAccountForFamily(
+          detectModelFamily(model.id),
+          accountStore,
+          triedAccountIds,
+        );
+        if (best?.access) {
+          creds = apiKeyFor(best);
+          triedAccountIds.add(best.accountId);
+        }
+      }
+      triedAccessTokens.add(creds.token);
       const primaryEndpoint = endpointCandidates()[0];
       if (primaryEndpoint) prewarmConnection(primaryEndpoint);
       // Skip loadCodeAssist roundtrip when credentials already carry a projectId.
@@ -1732,7 +1763,21 @@ export function streamAntigravity(
           }
           const friendly = friendlyAntigravityError(response?.status, lastText);
           if (response?.status === 429 && /Quota reached\./i.test(friendly)) {
-            const next = await failoverToNextAccount(triedAccessTokens);
+            // Bench the exhausted account, then switch in memory only: the stream
+            // path never rewrites auth.json, keeping parallel sessions isolated.
+            const exhausted = Object.values(accountStore.accounts).find(
+              (account) => account.access === creds.token,
+            );
+            if (exhausted) {
+              markAccountRateLimited(exhausted.accountId);
+              triedAccountIds.add(exhausted.accountId);
+            }
+            const next = await failoverToNextAccountInMemory(
+              detectModelFamily(model.id),
+              accountStore,
+              triedAccountIds,
+              triedAccessTokens,
+            );
             if (next) {
               triedAccessTokens.add(next.token);
               creds = next;

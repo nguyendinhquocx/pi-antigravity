@@ -73,6 +73,10 @@ again and complete Google sign-in with the other account. Manage linked accounts
 
 On a hard quota wall (HTTP 429 with a reset hint), the provider automatically tries the next linked account.
 
+### Smart multi-account load balancing
+
+When multiple accounts are linked, requests automatically route per-prompt to the account with the most remaining quota for the requested model family (Claude, Gemini, or Argon). Selection runs entirely in memory without rewriting `auth.json`, so parallel sessions and subagents remain isolated and can consume different accounts concurrently. If an account hits a 429 quota wall, it is temporarily benched and the request automatically fails over to the next healthy account in the pool.
+
 ## Authentication and credential safety
 
 The provider uses the OAuth 2.0 Authorization Code flow with PKCE, so credentials are only ever exchanged with Google — never typed into Pi.

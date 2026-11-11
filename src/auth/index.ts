@@ -20,4 +20,14 @@ export {
   removeAccount,
   updateRememberedAccount,
 } from "./accounts.js";
-export type { AccountSummary, StoredAccount } from "./accounts.js";
+export type { AccountSummary, AccountsFile, StoredAccount } from "./accounts.js";
+export {
+  calculateAccountScore,
+  failoverToNextAccountInMemory,
+  isAccountAvailable,
+  loadQuotaCache,
+  markAccountRateLimited,
+  resetBalancerState,
+  selectBestAccountForFamily,
+} from "./balancer.js";
+export type { AntigravityQuotaCache } from "./balancer.js";

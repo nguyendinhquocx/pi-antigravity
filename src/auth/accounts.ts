@@ -17,7 +17,7 @@ export type StoredAccount = AntigravityOAuthCredentials & {
   lastUsedAt: number;
 };
 
-type AccountsFile = {
+export type AccountsFile = {
   version: 1;
   activeAccountId?: string;
   accounts: Record<string, StoredAccount>;
@@ -54,7 +54,7 @@ function readJsonObject(path: string): Record<string, unknown> | undefined {
 }
 
 function writePrivateJson(path: string, value: unknown): void {
-  const tempPath = `${path}.${process.pid}.tmp`;
+  const tempPath = `${path}.${process.pid}.${Date.now()}-${Math.random().toString(36).slice(2, 8)}.tmp`;
   writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   chmodSync(tempPath, 0o600);
   renameSync(tempPath, path);
@@ -99,7 +99,7 @@ export function loadAccountStore(): AccountsFile {
   return normalizeStore(readJsonObject(accountsPath()));
 }
 
-function saveAccountStore(store: AccountsFile): void {
+export function saveAccountStore(store: AccountsFile): void {
   writePrivateJson(accountsPath(), store);
 }
 
@@ -247,12 +247,12 @@ export function listAccounts(): AccountSummary[] {
   }));
 }
 
-async function ensureFresh(account: StoredAccount): Promise<StoredAccount> {
+export async function ensureFresh(account: StoredAccount): Promise<StoredAccount> {
   if (account.access && account.expires > Date.now() + REFRESH_SKEW_MS) return account;
   return accountFromCredentials(await refreshAntigravityToken(account), account);
 }
 
-function apiKeyFor(account: StoredAccount): AntigravityApiKey {
+export function apiKeyFor(account: StoredAccount): AntigravityApiKey {
   const email = account.email?.trim();
   return {
     token: account.access,
