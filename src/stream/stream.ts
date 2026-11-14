@@ -18,6 +18,13 @@ import {
   markAccountRateLimited,
   selectBestAccountForFamily,
 } from "../auth/balancer.js";
+
+/**
+ * Short bench for generic RESOURCE_EXHAUSTED 429s. Unlike hard quota walls
+ * (10 min) this 429 may be a burst throttle or shared capacity pressure, so the
+ * account returns to rotation quickly instead of sitting out the full window.
+ */
+const CAPACITY_429_COOLDOWN_MS = 2 * 60 * 1000;
 import {
   antigravityHeaders,
   endpointCandidates,
@@ -1707,6 +1714,14 @@ export function streamAntigravity(
           if (!response && lastEndpointError !== undefined) throw lastEndpointError;
 
           if (response?.ok) break;
+          // Generic RESOURCE_EXHAUSTED can be one runtime variant throttled while another
+          // still has capacity (e.g. gemini-3.8-flash-high vs -low). Try the fallback
+          // candidate before giving up on this account.
+          const capacity429 =
+            response?.status === 429 && !isAccountQuota429(lastText) && !isRetryableRateLimit(lastText);
+          if (capacity429 && candIdx + 1 < runtimeCandidates.length) {
+            continue;
+          }
           if (response?.status === 404) {
             if (candIdx + 1 < runtimeCandidates.length) {
               continue;
@@ -1793,6 +1808,39 @@ export function streamAntigravity(
               continue;
             }
             throw new Error(friendly);
+          }
+          if (response?.status === 429 && isKnownStoreToken) {
+            // Generic RESOURCE_EXHAUSTED (no reset hint) may be a per-account burst
+            // throttle or shared model-capacity pressure. Bench the current account
+            // briefly and rotate to the next one in memory before surfacing the
+            // model-unavailable error, so a healthy account still serves the turn.
+            const throttled = Object.values(accountStore.accounts).find(
+              (account) => account.access === creds.token,
+            );
+            if (throttled) {
+              markAccountRateLimited(throttled.accountId, CAPACITY_429_COOLDOWN_MS);
+              triedAccountIds.add(throttled.accountId);
+            }
+            const next = await failoverToNextAccountInMemory(
+              detectModelFamily(model.id),
+              accountStore,
+              triedAccountIds,
+              triedAccessTokens,
+            );
+            if (next) {
+              triedAccessTokens.add(next.token);
+              creds = next;
+              requestHeaders = antigravityHeaders(creds.token);
+              const switchedProject = creds.projectId ? null : await loadCodeAssist(creds.token);
+              projectId = resolveProjectId({
+                token: creds.token,
+                warmedProject: switchedProject,
+                credentialProjectId: creds.projectId,
+              });
+              setLastProjectId(projectId);
+              emptyAttempt = -1;
+              continue;
+            }
           }
           throw new Error(
             `Antigravity API error (${publicErrorStatus(response?.status, friendly)}, ${formatRequestDiagnostics({ projectId, runtimeModel })}): ${friendly}`,
