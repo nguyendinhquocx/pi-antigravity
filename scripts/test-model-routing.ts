@@ -630,8 +630,10 @@ assert.match(
   friendlyAntigravityError(429, "Individual quota reached. Resets in 1h"),
   /Quota reached/,
 );
-// Issue #89: generic RESOURCE_EXHAUSTED without a reset hint is an unavailable model,
-// not a short throttle. It must not carry the tokens Pi uses to retry automatically.
+// Issue #89: generic RESOURCE_EXHAUSTED without a reset hint is transient capacity
+// pressure, not a short throttle nor an account quota wall. It must not carry the
+// tokens Pi uses to retry automatically, and must not suggest the plain model id
+// (Google answers it with 404 despite listing it in the catalog).
 const unavailable429Error = friendlyAntigravityError(
   429,
   JSON.stringify({
@@ -643,9 +645,9 @@ const unavailable429Error = friendlyAntigravityError(
   }),
 );
 assert.ok(!/Quota reached/i.test(unavailable429Error), "generic 429 must not be classified as Quota reached");
-assert.match(unavailable429Error, /unavailable right now/);
+assert.match(unavailable429Error, /capacity-throttled right now/);
 assert.match(unavailable429Error, /Resource has been exhausted/);
-assert.match(unavailable429Error, /gemini-3\.8-flash/);
+assert.ok(!/switch to gemini-3\.8-flash/i.test(unavailable429Error), "plain model id 404s, must not be suggested");
 assert.ok(!/ResourceExhausted/.test(unavailable429Error), "must not mark a dead model as retryable");
 assert.ok(!/\b429\b/.test(unavailable429Error), "numeric 429 would make Pi retry the dead model");
 

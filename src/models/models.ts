@@ -383,6 +383,23 @@ export function getFallbackRuntimeModel(runtimeModel: string, effort?: string): 
     : undefined;
 }
 
+/**
+ * Same-generation lower-effort variants for capacity pressure. Generic
+ * RESOURCE_EXHAUSTED 429s often throttle only the high-thinking variant while
+ * -medium/-low still serve. Google also retires whole generations per account
+ * (gemini-3.7/3.6 now 404), so degrading must stay within the same generation.
+ */
+export function getCapacityFallbackRuntimeModels(runtimeModel: string): string[] {
+  if (runtimeModel.endsWith("-high")) {
+    const base = runtimeModel.slice(0, -"-high".length);
+    return [`${base}-medium`, `${base}-low`];
+  }
+  if (runtimeModel.endsWith("-medium")) {
+    return [`${runtimeModel.slice(0, -"-medium".length)}-low`];
+  }
+  return [];
+}
+
 /** Return the legacy Flash downgrade candidate before checking current catalog availability. */
 function legacyFallbackRuntimeModel(runtimeModel: string, effort?: string): string | undefined {
   if (runtimeModel.startsWith("gemini-3.8-flash-")) {

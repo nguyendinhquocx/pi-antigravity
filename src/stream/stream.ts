@@ -61,6 +61,7 @@ import {
 } from "../types/enums.js";
 import {
   getCurrentAntigravityRouting,
+  getCapacityFallbackRuntimeModels,
   getMaxOutputTokens,
   getAntigravityRequestModelId,
   getFallbackRuntimeModel,
@@ -1113,10 +1114,12 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
     if (/rate.?limit|too many requests/i.test(msg)) {
       return "Rate limited by Antigravity (429 ResourceExhausted). Next: retrying automatically; if it persists, switch models.";
     }
-    // A generic RESOURCE_EXHAUSTED body, with no reset hint, is how unavailable models
-    // such as gemini-3.1-pro fail (#89). Do not include 429/ResourceExhausted: those
-    // tokens make Pi burn its automatic retry budget and look like an account quota wall.
-    return `This model is unavailable right now (${msg || "resource exhausted"}). Next: switch to gemini-3.8-flash or another Flash model. This is not necessarily an account quota wall.`;
+    // A generic RESOURCE_EXHAUSTED body, with no reset hint, is transient model-capacity
+    // pressure (#89): the effort variant recovers on its own, and the stream path already
+    // degrades to -medium/-low and rotates accounts before surfacing this. Do not include
+    // 429/ResourceExhausted (Pi would burn its retry budget) and do not suggest the plain
+    // model id — Google now answers it with 404 despite listing it in the catalog.
+    return `This model variant is capacity-throttled right now (${msg || "resource exhausted"}). Next: retry in a moment or switch to another model. This is not an account quota wall.`;
   }
   if (status === 500) {
     return "Antigravity had an internal server error. Next: retry in a moment or switch models.";
@@ -1626,7 +1629,13 @@ export function streamAntigravity(
         }
       }
 
+      // Candidate order: same-generation effort downgrade first (capacity 429s often
+      // throttle only the -high variant while -medium/-low serve), then the legacy
+      // cross-generation fallback for accounts where the whole generation 404s.
       const runtimeCandidates = [initialRuntimeModel];
+      for (const capacityVariant of getCapacityFallbackRuntimeModels(initialRuntimeModel)) {
+        if (!runtimeCandidates.includes(capacityVariant)) runtimeCandidates.push(capacityVariant);
+      }
       const fallback = getFallbackRuntimeModel(initialRuntimeModel, effort);
       if (fallback && fallback !== initialRuntimeModel) {
         runtimeCandidates.push(fallback);

@@ -66,18 +66,18 @@ try {
   assert.equal(recoveredText?.type === "text" ? recoveredText.text : "", "now answering");
 
   // Recovery test 3: generic RESOURCE_EXHAUSTED 429 on gemini-3.8-flash-high degrades
-  // to the fallback runtime candidate (gemini-3.7-flash-high) instead of failing the turn.
+  // within the same generation (-medium then -low) instead of failing the turn.
+  const capacityModels: string[] = [];
   let capacityCalls = 0;
   globalThis.fetch = (async (_url, init) => {
     const body = JSON.parse(String(init?.body));
-    if (++capacityCalls === 1) {
-      assert.equal(body.model, "gemini-3.8-flash-high");
+    capacityModels.push(body.model);
+    if (++capacityCalls <= 2) {
       return new Response(
         JSON.stringify({ error: { code: 429, message: "Resource has been exhausted (e.g. check quota).", status: "RESOURCE_EXHAUSTED" } }),
         { status: 429 },
       );
     }
-    assert.equal(body.model, "gemini-3.7-flash-high");
     return new Response('data: {"response":{"candidates":[{"content":{"parts":[{"text":"served by fallback model"}]},"finishReason":"STOP"}]}}\n\ndata: [DONE]\n\n');
   }) as typeof fetch;
   const fallbackServed = await streamAntigravity(
@@ -86,7 +86,11 @@ try {
     { ...options, reasoning: "high" },
   ).result();
   assert.equal(fallbackServed.stopReason, "stop");
-  assert.equal(capacityCalls, 2, "capacity 429 must try the fallback runtime candidate");
+  assert.deepEqual(capacityModels, [
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-low",
+  ]);
   const fallbackText = fallbackServed.content.find((b) => b.type === "text");
   assert.equal(fallbackText?.type === "text" ? fallbackText.text : "", "served by fallback model");
 
@@ -125,10 +129,12 @@ try {
   const seenTokens: string[] = [];
   globalThis.fetch = (async (_url, init) => {
     const headers = (init?.headers ?? {}) as Record<string, string>;
-    seenTokens.push(String(headers.Authorization ?? "").replace("Bearer ", ""));
-    if (++rotationCalls <= 2) {
-      // Throttle both runtime candidates (gemini-3.8-flash-high then gemini-3.7-flash-high)
-      // on the first account before the in-memory rotation kicks in.
+    const token = String(headers.Authorization ?? "").replace("Bearer ", "");
+    seenTokens.push(token);
+    rotationCalls++;
+    // Throttle every runtime candidate on the first account; the second account
+    // serves immediately. This forces the in-memory rotation path.
+    if (token === "token-a") {
       return new Response(
         JSON.stringify({ error: { code: 429, message: "Resource has been exhausted (e.g. check quota).", status: "RESOURCE_EXHAUSTED" } }),
         { status: 429 },
