@@ -952,6 +952,27 @@ const flash37 = buildRequest(flash37Model, dummyContext, "test-proj", { reasonin
 assert.equal(flash37.request.generationConfig?.thinkingConfig?.thinkingBudget, -1);
 assert.equal(flash37.request.generationConfig?.thinkingConfig?.includeThoughts, true);
 
+// System instruction fingerprint sanitization: Google soft-blocks client prompt
+// fingerprints with generic RESOURCE_EXHAUSTED, so both the Pi host opening phrase
+// and the legacy identity bridge must be reworded before sending.
+const fingerprintContext: Context = {
+  systemPrompt:
+    "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files.",
+  messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+};
+const fingerprintReq = buildRequest(flash38Model, fingerprintContext, "test-proj", {}, "gemini-3.8-flash-low");
+const fingerprintText = fingerprintReq.request.systemInstruction?.parts.map((part) => part.text).join("\n") ?? "";
+assert.ok(!/operating\s+inside\s+pi/gi.test(fingerprintText), "Pi host opening fingerprint must be reworded");
+assert.ok(fingerprintText.includes("working inside the Pi coding environment"), "reworded phrase must be present");
+assert.ok(fingerprintText.includes("You help users by reading files."), "rest of the prompt must stay intact");
+
+const bridgeContext: Context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] };
+const bridgeReq = buildRequest(flash38Model, bridgeContext, "test-proj", {}, "gemini-3.8-flash-low");
+const bridgeText = bridgeReq.request.systemInstruction?.parts.map((part) => part.text).join("\n") ?? "";
+assert.ok(!/You are Antigravity/gi.test(bridgeText), "identity bridge must not claim Antigravity");
+assert.ok(!/Google DeepMind/gi.test(bridgeText), "bridge must not claim Google DeepMind");
+assert.ok(bridgeText.includes("agentic AI coding assistant"), "neutral bridge instruction must remain");
+
 const flash36 = buildRequest(
   { ...model, id: "gemini-3.6-flash", maxTokens: 65536 },
   dummyContext,
@@ -1426,7 +1447,8 @@ assert.ok(
 
 const fallbackPersona = buildRequest(flash37Model, dummyContext, "test-proj", {}, "gemini-3.7-flash-low");
 assert.equal(fallbackPersona.request.systemInstruction.parts.length, 2);
-assert.match(fallbackPersona.request.systemInstruction.parts[0]?.text || "", /You are Antigravity/);
+assert.match(fallbackPersona.request.systemInstruction.parts[0]?.text || "", /You are an agentic AI coding assistant/);
+assert.ok(!/Antigravity|Google DeepMind/.test(fallbackPersona.request.systemInstruction.parts[0]?.text || ""), "bridge must not claim Antigravity identity");
 
 const flashCost = ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.7-flash")?.cost;
 assert.equal(flashCost?.input, 0.1);
