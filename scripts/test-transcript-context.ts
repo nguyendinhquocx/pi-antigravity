@@ -69,7 +69,13 @@ function declarations(request: ReturnType<typeof buildRequest>): string[] {
 }
 
 function systemText(request: ReturnType<typeof buildRequest>): string {
-  return (request.request.systemInstruction?.parts ?? []).map((part) => part.text).join("\n");
+  // System prompt now ships as the leading user turn (see buildRequest) — read it back from there.
+  const lead = request.request.contents[0]?.parts?.find((part) => "text" in part)?.text ?? "";
+  const marker = "<system_instructions>";
+  const start = lead.indexOf(marker);
+  if (start === -1) return "";
+  const end = lead.indexOf("</system_instructions>", start);
+  return lead.slice(start + marker.length, end === -1 ? undefined : end).trim();
 }
 
 const transcriptContext = {

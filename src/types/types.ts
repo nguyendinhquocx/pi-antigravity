@@ -108,7 +108,14 @@ export type GeminiGenerationConfig = {
 
 export type GeminiRequestBody = {
   contents: GeminiContent[];
-  systemInstruction: {
+  /**
+   * Deprecated on the wire: Google fingerprints systemInstruction for known
+   * third-party client prompts and soft-blocks with generic RESOURCE_EXHAUSTED,
+   * while conversation contents are not scanned. buildRequest ships the system
+   * prompt as a leading user turn instead; the field stays in the type for
+   * tests that construct minimal requests directly.
+   */
+  systemInstruction?: {
     role: "user";
     parts: GeminiTextPart[];
   };

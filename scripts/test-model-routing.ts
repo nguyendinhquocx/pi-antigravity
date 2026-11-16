@@ -953,22 +953,26 @@ assert.equal(flash37.request.generationConfig?.thinkingConfig?.thinkingBudget, -
 assert.equal(flash37.request.generationConfig?.thinkingConfig?.includeThoughts, true);
 
 // System instruction fingerprint sanitization: Google soft-blocks client prompt
-// fingerprints with generic RESOURCE_EXHAUSTED, so both the Pi host opening phrase
-// and the legacy identity bridge must be reworded before sending.
+// fingerprints with generic RESOURCE_EXHAUSTED. The whole system prompt now ships
+// as a leading user turn (contents are not scanned), with the reword sanitizer
+// applied as defense in depth.
 const fingerprintContext: Context = {
   systemPrompt:
     "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files.",
   messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
 };
 const fingerprintReq = buildRequest(flash38Model, fingerprintContext, "test-proj", {}, "gemini-3.8-flash-low");
-const fingerprintText = fingerprintReq.request.systemInstruction?.parts.map((part) => part.text).join("\n") ?? "";
+assert.equal(fingerprintReq.request.systemInstruction, undefined, "systemInstruction must not be sent");
+const fingerprintText = fingerprintReq.request.contents[0]?.parts.find((part) => "text" in part)?.text ?? "";
+assert.ok(fingerprintText.startsWith("<system_instructions>"), "system prompt must ship as leading user turn");
 assert.ok(!/operating\s+inside\s+pi/gi.test(fingerprintText), "Pi host opening fingerprint must be reworded");
 assert.ok(fingerprintText.includes("working inside the Pi coding environment"), "reworded phrase must be present");
 assert.ok(fingerprintText.includes("You help users by reading files."), "rest of the prompt must stay intact");
+assert.ok(fingerprintText.includes("answer the user's latest message"), "application directive must follow the wrapped prompt");
 
 const bridgeContext: Context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] };
 const bridgeReq = buildRequest(flash38Model, bridgeContext, "test-proj", {}, "gemini-3.8-flash-low");
-const bridgeText = bridgeReq.request.systemInstruction?.parts.map((part) => part.text).join("\n") ?? "";
+const bridgeText = bridgeReq.request.contents[0]?.parts.find((part) => "text" in part)?.text ?? "";
 assert.ok(!/You are Antigravity/gi.test(bridgeText), "identity bridge must not claim Antigravity");
 assert.ok(!/Google DeepMind/gi.test(bridgeText), "bridge must not claim Google DeepMind");
 assert.ok(bridgeText.includes("agentic AI coding assistant"), "neutral bridge instruction must remain");
@@ -1338,15 +1342,20 @@ const convertedAborted = convertMessages(flash37Model, abortedContext, geminiRun
 assert.equal(convertedAborted.length, 1);
 assert.equal(convertedAborted[0]?.role, "user");
 
-const withPiPrompt = buildRequest(
+const withPiPromptLead = buildRequest(
   flash37Model,
   { ...dummyContext, systemPrompt: "You are Pi. Follow AGENTS.md." },
   "test-proj",
   {},
   "gemini-3.7-flash-low",
 );
-assert.equal(withPiPrompt.request.systemInstruction.parts.length, 1);
-assert.equal(withPiPrompt.request.systemInstruction.parts[0]?.text, "You are Pi. Follow AGENTS.md.");
+assert.equal(withPiPromptLead.request.systemInstruction, undefined);
+assert.ok(
+  (withPiPromptLead.request.contents[0]?.parts.find((part) => "text" in part)?.text ?? "").includes(
+    "You are Pi. Follow AGENTS.md.",
+  ),
+  "flat systemPrompt must ship inside the leading user turn",
+);
 
 // Skill-only turns are injected instructions, not user prompts. The request remains
 // valid without inventing a user message, and the Skill is preserved as system context.
@@ -1368,15 +1377,13 @@ const skillOnlyRequest = buildRequest(
 );
 assert.equal(skillOnlyRequest.request.contents.length, 1);
 assert.equal(skillOnlyRequest.request.contents[0]?.role, "user");
-assert.equal(
-  skillOnlyRequest.request.contents[0]?.parts[0]?.text,
-  "Apply the active system instructions.",
+const skillLead = skillOnlyRequest.request.contents[0]?.parts[0]?.text ?? "";
+assert.ok(skillLead.startsWith("<system_instructions>"), "skill-only request ships a system turn");
+assert.ok(
+  skillLead.includes('<skill name="smart-commit-grouping">Group commits by intent.</skill>'),
+  "injected skill must ride in the system turn",
 );
-assert.equal(skillOnlyRequest.request.systemInstruction.parts.length, 3);
-assert.equal(
-  skillOnlyRequest.request.systemInstruction.parts[2]?.text,
-  '<skill name="smart-commit-grouping">Group commits by intent.</skill>',
-);
+assert.equal(skillOnlyRequest.request.systemInstruction, undefined);
 
 const systemOnlyRequest = buildRequest(
   flash37Model,
@@ -1385,11 +1392,10 @@ const systemOnlyRequest = buildRequest(
   {},
   "gemini-3.7-flash-low",
 );
-assert.equal(systemOnlyRequest.request.contents[0]?.parts[0]?.text, "Apply the active system instructions.");
-assert.equal(
-  systemOnlyRequest.request.systemInstruction.parts[0]?.text,
-  "Follow the repository conventions.",
-);
+const systemOnlyLead = systemOnlyRequest.request.contents[0]?.parts[0]?.text ?? "";
+assert.ok(systemOnlyLead.startsWith("<system_instructions>"), "system prompt ships as leading user turn");
+assert.ok(systemOnlyLead.includes("Follow the repository conventions."));
+assert.equal(systemOnlyRequest.request.systemInstruction, undefined);
 
 const skillAndUserContext = {
   messages: [
@@ -1408,10 +1414,11 @@ const skillAndUserRequest = buildRequest(
   {},
   "gemini-3.7-flash-low",
 );
-assert.equal(skillAndUserRequest.request.contents[0]?.parts[0]?.text, " Commit the staged changes.");
-assert.equal(
-  skillAndUserRequest.request.systemInstruction.parts[2]?.text,
-  '<skill name="smart-commit-grouping">Group commits by intent.</skill>',
+assert.equal(skillAndUserRequest.request.contents[1]?.parts[0]?.text, " Commit the staged changes.");
+assert.ok(
+  (skillAndUserRequest.request.contents[0]?.parts[0]?.text ?? "").includes(
+    '<skill name="smart-commit-grouping">Group commits by intent.</skill>',
+  ),
 );
 
 // Tool-result-only turns also need no synthetic user text.
@@ -1434,21 +1441,26 @@ const toolResultOnlyRequest = buildRequest(
   {},
   "gemini-3.7-flash-low",
 );
-assert.equal(toolResultOnlyRequest.request.contents.length, 1);
+assert.equal(toolResultOnlyRequest.request.contents.length, 2);
 assert.equal(toolResultOnlyRequest.request.contents[0]?.role, "user");
 assert.ok(
-  toolResultOnlyRequest.request.contents[0]?.parts.some((part) => "functionResponse" in part),
+  toolResultOnlyRequest.request.contents[0]?.parts[0]?.text.startsWith("<system_instructions>"),
+  "system turn leads even tool-result-only requests",
 );
+const toolResultTurn = toolResultOnlyRequest.request.contents[1] ?? { parts: [] };
+assert.equal(toolResultTurn.role, "user");
+assert.ok(toolResultTurn.parts.some((part) => "functionResponse" in part));
 assert.ok(
-  toolResultOnlyRequest.request.contents[0]?.parts.some(
+  toolResultTurn.parts.some(
     (part) => "text" in part && part.text === "Continue the active task using the available instructions and context.",
   ),
 );
 
 const fallbackPersona = buildRequest(flash37Model, dummyContext, "test-proj", {}, "gemini-3.7-flash-low");
-assert.equal(fallbackPersona.request.systemInstruction.parts.length, 2);
-assert.match(fallbackPersona.request.systemInstruction.parts[0]?.text || "", /You are an agentic AI coding assistant/);
-assert.ok(!/Antigravity|Google DeepMind/.test(fallbackPersona.request.systemInstruction.parts[0]?.text || ""), "bridge must not claim Antigravity identity");
+const personaLead = fallbackPersona.request.contents[0]?.parts.find((part) => "text" in part)?.text ?? "";
+assert.ok(personaLead.startsWith("<system_instructions>"), "bridge persona ships as leading user turn");
+assert.match(personaLead, /You are an agentic AI coding assistant/);
+assert.ok(!/Antigravity|Google DeepMind/.test(personaLead), "bridge must not claim Antigravity identity");
 
 const flashCost = ANTIGRAVITY_MODELS.find((m) => m.id === "gemini-3.7-flash")?.cost;
 assert.equal(flashCost?.input, 0.1);
@@ -1544,13 +1556,13 @@ const reqFlash38 = buildRequest(
   {},
   "gemini-3.8-flash-high",
 );
-assert.equal(reqFlash38.request.labels?.last_step_index, "0");
+assert.equal(reqFlash38.request.labels?.last_step_index, "1");
 assert.equal(reqFlash38.request.labels?.request_id, `${reqFlash38.request.labels?.trajectory_id}-0`);
 assert.equal(reqFlash38.request.labels?.used_claude, "false");
 assert.equal(reqFlash38.request.labels?.used_claude_conservative, "false");
 assert.equal(reqFlash38.request.labels?.used_non_gemini_model, "false");
 assert.equal(reqFlash38.request.labels?.model_enum, "MODEL_PLACEHOLDER_M318");
-assert.match(reqFlash38.requestId, /\/1$/);
+assert.match(reqFlash38.requestId, /\/2$/);
 
 // Multi-session isolation: two independent chats on the same account
 const reqChatA_1 = buildRequest(
@@ -1568,8 +1580,10 @@ const reqChatB_1 = buildRequest(
   "gemini-3.8-flash-high",
 );
 assert.notEqual(reqChatA_1.request.labels?.trajectory_id, reqChatB_1.request.labels?.trajectory_id);
-assert.equal(reqChatA_1.request.labels?.last_execution_id, undefined);
-assert.equal(reqChatB_1.request.labels?.last_execution_id, undefined);
+// Step is now 2 (system turn + user turn), so the CLI wire includes a stable
+// placeholder for the previous turn's execution id.
+assert.ok(reqChatA_1.request.labels?.last_execution_id, "step>1 carries last_execution_id");
+assert.ok(reqChatB_1.request.labels?.last_execution_id, "step>1 carries last_execution_id");
 
 const multiTurnContext = {
   ...dummyContext,
@@ -1734,11 +1748,11 @@ const turn1Context: Context = {
   messages: [{ role: "user", content: "read file", timestamp: baseTime }],
 };
 
-// Turn 1, call 1: initial user prompt (0 prior assistant turns -> request_id: <traj>-0)
+// Turn 1, call 1: initial user prompt (system turn + user turn -> step 2, request_id: <traj>-0)
 const reqTurn1 = buildRequest(flash37Model, turn1Context, "test-proj", {}, "gemini-3.7-flash-low");
-assert.equal(reqTurn1.request.labels?.last_step_index, "0");
+assert.equal(reqTurn1.request.labels?.last_step_index, "1");
 assert.equal(reqTurn1.request.labels?.request_id, `${reqTurn1.request.labels?.trajectory_id}-0`);
-assert.match(reqTurn1.requestId, /\/1$/);
+assert.match(reqTurn1.requestId, /\/2$/);
 
 // Turn 1, call 2: tool execution result follows (1 assistant toolCall + 1 toolResult in context -> request_id: <traj>-1)
 const turn1ToolContext: Context = {
@@ -1773,9 +1787,9 @@ const turn1ToolContext: Context = {
   ],
 };
 const reqTurn1Tool = buildRequest(flash37Model, turn1ToolContext, "test-proj", {}, "gemini-3.7-flash-low");
-assert.equal(reqTurn1Tool.request.labels?.last_step_index, "2");
+assert.equal(reqTurn1Tool.request.labels?.last_step_index, "3");
 assert.equal(reqTurn1Tool.request.labels?.request_id, `${reqTurn1Tool.request.labels?.trajectory_id}-1`);
-assert.match(reqTurn1Tool.requestId, /\/3$/);
+assert.match(reqTurn1Tool.requestId, /\/4$/);
 assert.equal(
   reqTurn1Tool.request.labels?.trajectory_id,
   reqTurn1.request.labels?.trajectory_id,
@@ -1800,9 +1814,9 @@ const turn2Context: Context = {
   ],
 };
 const reqTurn2 = buildRequest(flash37Model, turn2Context, "test-proj", {}, "gemini-3.7-flash-low");
-assert.equal(reqTurn2.request.labels?.last_step_index, "4");
+assert.equal(reqTurn2.request.labels?.last_step_index, "5");
 assert.equal(reqTurn2.request.labels?.request_id, `${reqTurn2.request.labels?.trajectory_id}-2`);
-assert.match(reqTurn2.requestId, /\/5$/);
+assert.match(reqTurn2.requestId, /\/6$/);
 assert.equal(
   reqTurn2.request.labels?.trajectory_id,
   reqTurn1.request.labels?.trajectory_id,
