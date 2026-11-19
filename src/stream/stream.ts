@@ -37,6 +37,11 @@ import {
   resolveProjectId,
 } from "../client/client.js";
 import {
+  enterpriseStreamUrl,
+  resolveEnterpriseTarget,
+  toEnterpriseGenerateBody,
+} from "../client/enterprise.js";
+import {
   getCurrentAvailableModels,
   getCurrentEndpoint,
   getCurrentMatchedModelDebug,
@@ -63,6 +68,7 @@ import {
   getCurrentAntigravityRouting,
   getCapacityFallbackRuntimeModels,
   getMaxOutputTokens,
+  advertisedSiblingRuntimes,
   getAntigravityRequestModelId,
   getFallbackRuntimeModel,
   getThinkingConfig,
@@ -93,6 +99,7 @@ import {
   resolveSessionTrajectory,
   sanitizeText,
 } from "../utils/util.js";
+import { isCreditsEnabled } from "../utils/credits.js";
 import { antigravityFetch, prewarmConnection } from "../utils/http.js";
 
 export { ANTIGRAVITY_API };
@@ -102,7 +109,7 @@ const ANTIGRAVITY_SYSTEM_INSTRUCTION =
   "You are pair programming with a user to solve coding tasks. Be concise, practical, and tool-aware.";
 
 const ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION =
-  'CRITICAL: NEVER output rule checks, formatting guidelines, constraint checklists (e.g. "No emdashes"), or your thinking/personality preambles in the final response. Output only the final response.';
+  'CRITICAL: NEVER output rule checks, formatting guidelines, constraint checklists (e.g. "No emdashes"), internal thinking/reasoning preambles, or fake "[Observation from ...]" tool logs in the final response. When calling a tool, emit a real functionCall; never simulate tool calls or tool observations in plain text. Output only the final response.';
 
 const CONTINUATION_TEXT = "Continue the active task using the available instructions and context.";
 let toolCallCounter = 0;
@@ -346,9 +353,19 @@ export function convertMessages(
   context: Context,
   runtimeModel: string,
 ): GeminiContent[] {
+  return convertMessagesWithMetadata(model, context, runtimeModel).contents;
+}
+
+function convertMessagesWithMetadata(
+  model: Model<Api>,
+  context: Context,
+  runtimeModel: string,
+): { contents: GeminiContent[]; hasDegradedToolObservations: boolean } {
   const contents: GeminiContent[] = [];
+  let hasDegradedToolObservations = false;
   const requiresSig = geminiRequiresThoughtSignature(runtimeModel);
   const droppedToolCallIds = new Map<string, string>();
+  const droppedEmptyToolCalls = new Map<string, string[]>();
   for (const msg of context.messages) {
     if ((msg.role as string) === "system") continue;
     if (msg.role === "user") {
@@ -383,6 +400,9 @@ export function convertMessages(
           });
         } else if (block.type === "thinking" && String(block.thinking || "").trim()) {
           if (!isSameModel) continue;
+          if (requiresSig && !isValidThoughtSignature(block.thinkingSignature) && !groupIsSigned) {
+            continue;
+          }
           parts.push({
             thought: true,
             text: sanitizeText(block.thinking),
@@ -400,11 +420,17 @@ export function convertMessages(
             })();
             if (rawId) {
               droppedToolCallIds.set(rawId, argsText);
-              droppedToolCallIds.set(sanitizeToolCallId(rawId, block.name), argsText);
             } else {
-              droppedToolCallIds.set(`empty:${block.name}`, argsText);
+              const queue = droppedEmptyToolCalls.get(block.name) ?? [];
+              queue.push(argsText);
+              droppedEmptyToolCalls.set(block.name, queue);
             }
           } else {
+            // Tool call IDs can be reused later in a session; a replayable call
+            // must not inherit the dropped status of an earlier call.
+            const rawId = block.id || "";
+            if (rawId) droppedToolCallIds.delete(rawId);
+            else droppedEmptyToolCalls.delete(block.name);
             parts.push({
               functionCall: {
                 name: block.name,
@@ -418,6 +444,11 @@ export function convertMessages(
           }
         }
       }
+      // Keep a boundary between the human's message and flattened tool results.
+      // A real functionCall cannot be replayed without the required signature.
+      if (!parts.length && requiresSig && !groupIsSigned && toolCalls.length > 0) {
+        parts.push({ text: "[Earlier tool call omitted because its signature is unavailable.]" });
+      }
       appendTurn(contents, GeminiRole.Model, parts);
     } else if (msg.role === "toolResult") {
       const text = msg.content
@@ -430,12 +461,35 @@ export function convertMessages(
       const sanitizedId = toolCallIdNeeded(model.id, runtimeModel)
         ? sanitizeToolCallId(rawId, msg.toolName)
         : rawId;
-      const droppedArgs = requiresSig
-        ? (droppedToolCallIds.get(rawId) ??
-          droppedToolCallIds.get(sanitizedId) ??
-          (rawId === "" ? droppedToolCallIds.get(`empty:${msg.toolName}`) : undefined))
+      let droppedId = rawId;
+      let droppedArgs = requiresSig
+        ? rawId
+          ? droppedToolCallIds.get(rawId)
+          : droppedEmptyToolCalls.get(msg.toolName)?.[0]
         : undefined;
+      if (
+        requiresSig &&
+        rawId &&
+        droppedArgs === undefined &&
+        toolCallIdNeeded(model.id, runtimeModel)
+      ) {
+        const matches = [...droppedToolCallIds.entries()].filter(
+          ([id]) => sanitizeToolCallId(id, msg.toolName) === sanitizedId,
+        );
+        if (matches.length > 1) {
+          throw new Error("Ambiguous sanitized tool call ID in historical tool results.");
+        }
+        if (matches[0]) [droppedId, droppedArgs] = matches[0];
+      }
       if (droppedArgs !== undefined) {
+        if (rawId) {
+          droppedToolCallIds.delete(droppedId);
+        } else {
+          const queue = droppedEmptyToolCalls.get(msg.toolName);
+          queue?.shift();
+          if (queue && queue.length === 0) droppedEmptyToolCalls.delete(msg.toolName);
+        }
+        hasDegradedToolObservations = true;
         const label =
           droppedArgs === "{}" ? `\`${msg.toolName}\`` : `\`${msg.toolName}\` (${droppedArgs})`;
         appendTurn(contents, GeminiRole.User, [
@@ -503,7 +557,7 @@ export function convertMessages(
     appendTurn(contents, GeminiRole.User, [{ text: CONTINUATION_TEXT }]);
   }
 
-  return contents;
+  return { contents, hasDegradedToolObservations };
 }
 
 type SchemaReferenceIssue = {
@@ -916,6 +970,28 @@ function mapToolChoiceMode(
   return GeminiToolCallingMode.Auto;
 }
 
+/**
+ * Neutralize system prompt phrases that trigger false 429 RESOURCE_EXHAUSTED
+ * responses from the Antigravity proxy when paired with `requestType: "agent"`.
+ */
+export function sanitizeSystemPrompt(text: string): string {
+  return text
+    .replace(
+      /running inside pi,\s*a coding agent harness/gi,
+      "running inside your development environment",
+    )
+    .replace(/inside pi,\s*a coding agent harness/gi, "inside your development environment")
+    .replace(
+      /(coding assistant )running inside pi(?=[.,!?;:\s]|$)(?!\.\w)/gi,
+      "$1running inside your development environment",
+    )
+    .replace(
+      /(coding agent )inside pi(?=[.,!?;:\s]|$)(?!\.\w)/gi,
+      "$1inside your development environment",
+    )
+    .replace(/\bpractical,\s*and tool-aware\./gi, "practical, and tool aware.");
+}
+
 /** Exported for unit tests. */
 export function buildRequest(
   model: Model<Api>,
@@ -927,7 +1003,10 @@ export function buildRequest(
   const injectedSkills = context.messages.flatMap((msg) =>
     msg.role === "user" ? skillBlocks(msg.content) : [],
   );
-  const systemPromptText = resolveCurrentSystemPrompt(context);
+  const rawSystemPromptText = resolveCurrentSystemPrompt(context);
+  const systemPromptText = rawSystemPromptText
+    ? sanitizeSystemPrompt(rawSystemPromptText)
+    : undefined;
   const declaredTools = resolveCurrentTools(context);
   // Google fingerprints systemInstruction for known third-party client prompts
   // (the Pi opening line, the Pi docs section, the legacy identity bridge) and
@@ -1018,7 +1097,7 @@ export function buildRequest(
   request.sessionId = envelope.sessionId;
   request.labels = envelope.labels;
 
-  return {
+  const generateRequest: AntigravityGenerateRequest = {
     project: projectId,
     model: runtimeModel,
     request,
@@ -1026,6 +1105,11 @@ export function buildRequest(
     userAgent: AntigravityUserAgent.Antigravity,
     requestId: envelope.requestId,
   };
+  if (isCreditsEnabled()) {
+    generateRequest.enabledCreditTypes = ["GOOGLE_ONE_AI"];
+  }
+
+  return generateRequest;
 }
 
 /** Exported for unit tests. */
@@ -1040,6 +1124,7 @@ function isAccountQuota429(text: string): boolean {
   return (
     /Individual quota reached/i.test(text) ||
     /Resets? in /i.test(text) ||
+    /AI credits balance is too low|INSUFFICIENT_G1_CREDITS/i.test(text) ||
     (!/rate.?limit/i.test(text) && /quota exceeded|exceeded your|daily limit/i.test(text))
   );
 }
@@ -1047,6 +1132,17 @@ function isAccountQuota429(text: string): boolean {
 /** Short throttles. Pi retries these; persistent model unavailability must not match. */
 function isRetryableRateLimit(text: string): boolean {
   return /rate.?limit|too many requests/i.test(text);
+}
+
+/**
+ * Generic capacity 429 with no reset hint. Dead tiers and live-but-throttled
+ * tiers share this body (#89, #122, #125). Callers decide whether to walk
+ * endpoints and sibling tiers; the public error stays non-retryable for Pi
+ * once those attempts are exhausted.
+ */
+export function isGenericResourceExhausted(text: string): boolean {
+  if (isAccountQuota429(text) || isRetryableRateLimit(text)) return false;
+  return /resource has been exhausted|RESOURCE_EXHAUSTED/i.test(text);
 }
 
 /**
@@ -1102,6 +1198,9 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
     const verifyHint = verifyUrl
       ? ` Open this link in a browser signed in to the same Google account to verify: ${verifyUrl}`
       : "";
+    if (/#3501|do not have a valid license of this product/i.test(msg)) {
+      return "This account's Gemini Enterprise license was not accepted on the consumer endpoint. Next: set ANTIGRAVITY_LOCATION to eu, us, or global, plus ANTIGRAVITY_ENTERPRISE_PROJECT and ANTIGRAVITY_USER_TIER from the license selector, then retry. A regional location is not sent to cloudcode-pa.";
+    }
     if (/permission|forbidden|access/i.test(msg) && !verifyUrl) {
       return "Antigravity access was denied for this account or project. Next: try another model, re-login, or use an account with access.";
     }
@@ -1118,9 +1217,15 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
     return "Antigravity reported a conflict for this request. Next: retry once or start a new chat session.";
   }
   if (status === 429) {
+    if (/AI credits balance is too low|INSUFFICIENT_G1_CREDITS/i.test(msg)) {
+      return "Your AI credits balance is exhausted. Please refill credits in Google One or wait for your regular quota to reset. Next: switch models or retry later.";
+    }
     const wait = msg.match(/Resets? in ([^.\n]+)/i)?.[1]?.trim();
     if (/Individual quota reached/i.test(msg)) {
-      return `Quota reached. Please wait ${wait || "for reset"}. Next: switch models or try again after reset.`;
+      const hint = isCreditsEnabled()
+        ? " (AI credits overage active; credit balance may be depleted)"
+        : " (Enable AI credits fallback with /antigravity.credits on)";
+      return `Quota reached. Please wait ${wait || "for reset"}.${hint} Next: switch models or try again after reset.`;
     }
     // Google answers a real quota wall with a "Resets in …" hint, but uses generic
     // RESOURCE_EXHAUSTED ("Resource has been exhausted (e.g. check quota).") for
@@ -1133,7 +1238,10 @@ export function friendlyAntigravityError(status: number | undefined, text: strin
       (!/rate.?limit/i.test(msg) &&
         /quota exceeded|exceeded your|limit reached|reached your|daily limit/i.test(msg));
     if (hardLimit) {
-      return `Quota reached.${wait ? ` Please wait ${wait}.` : ""} Next: switch models or retry later.`;
+      const hint = isCreditsEnabled()
+        ? " (AI credits overage active; credit balance may be depleted)"
+        : " (Enable AI credits fallback with /antigravity.credits on)";
+      return `Quota reached.${wait ? ` Please wait ${wait}.` : ""}${hint} Next: switch models or retry later.`;
     }
     if (/rate.?limit|too many requests/i.test(msg)) {
       return "Rate limited by Antigravity (429 ResourceExhausted). Next: retrying automatically; if it persists, switch models.";
@@ -1665,7 +1773,16 @@ export function streamAntigravity(
         runtimeCandidates.push(fallback);
       }
 
-      let requestHeaders = antigravityHeaders(creds.token);
+      const headersFor = (token: string): Record<string, string> => {
+        const headers = antigravityHeaders(token);
+        if (!enterpriseTarget) return headers;
+        const userAgent = headers["User-Agent"] || "";
+        return {
+          ...headers,
+          "User-Agent": userAgent.replace("auth_method=consumer", "auth_method=gcp"),
+        };
+      };
+      let requestHeaders = headersFor(creds.token);
 
       // Turn identity mirrors buildRequest's requestIndex (count of successful
       // assistant messages): it stays constant across retries of one turn and
@@ -1694,26 +1811,37 @@ export function streamAntigravity(
           recordStaticRouteDiagnostics(runtimeModel);
           response = undefined;
           let lastEndpointError: Error | undefined;
-          for (const endpoint of endpointCandidates()) {
+          const endpoints = enterpriseTarget ? [enterpriseTarget.host] : endpointCandidates();
+          for (const endpoint of endpoints) {
             setLastEndpoint(endpoint);
             // Every POST after the first for this turn replays under a fresh
             // upstream session/trajectory so it cannot queue behind the crashed
             // attempt's server-side generation (see retrySessionSeed).
             const nonce = nextRequestNonce(turnKey);
-            const body = JSON.stringify(
-              buildRequest(
-                model,
-                context,
-                projectId,
-                nonce === 0
-                  ? opts
-                  : { ...opts, sessionId: retrySessionSeed(opts.sessionId, nonce) },
-                runtimeModel,
-              ),
+            const attemptOptions =
+              nonce === 0 ? opts : { ...opts, sessionId: retrySessionSeed(opts.sessionId, nonce) };
+            let payload: unknown = buildRequest(
+              model,
+              context,
+              enterpriseTarget?.projectId || projectId,
+              attemptOptions,
+              runtimeModel,
             );
+            if (enterpriseTarget) {
+              payload = toEnterpriseGenerateBody(
+                payload as AntigravityGenerateRequest,
+                enterpriseTarget,
+              );
+            }
+            const rewritten = await opts.onPayload?.(payload, model);
+            if (rewritten !== undefined) payload = rewritten;
+            const body = JSON.stringify(payload);
+            const url = enterpriseTarget
+              ? enterpriseStreamUrl(enterpriseTarget)
+              : `${endpoint}/v1internal:streamGenerateContent?alt=sse`;
             try {
               response = await fetchWithHeaderDeadline(
-                `${endpoint}/v1internal:streamGenerateContent?alt=sse`,
+                url,
                 {
                   method: "POST",
                   headers: requestHeaders,
@@ -1736,7 +1864,10 @@ export function streamAntigravity(
             if (response.ok) break;
             lastText = await response.text();
             if (response.status === 429 && isAccountQuota429(lastText)) break;
-            // Generic resource exhaustion is a dead model, not a reason to walk every endpoint.
+            // Generic RESOURCE_EXHAUSTED is capacity pressure when another endpoint
+            // or same-generation tier might still be live (#122, #125). A model
+            // that fails every one of those still uses the non-retryable #89 message.
+            if (response.status === 429 && isGenericResourceExhausted(lastText)) continue;
             if (response.status === 429 && !isRetryableRateLimit(lastText)) break;
             if (![403, 404, 429, 500, 502, 503, 504].includes(response.status)) break;
           }
@@ -1773,6 +1904,16 @@ export function streamAntigravity(
                 runtimeCandidates.push(dynamic.id);
                 continue;
               }
+            }
+          }
+          if (response?.status === 429 && isGenericResourceExhausted(lastText)) {
+            const nextSibling = advertisedSiblingRuntimes(runtimeModel).find(
+              (id) => !runtimeCandidates.includes(id),
+            );
+            if (nextSibling && runtimeCandidates.length < 4) {
+              // Same-generation tiers before a cross-generation compatibility fallback.
+              runtimeCandidates.splice(candIdx + 1, 0, nextSibling);
+              continue;
             }
           }
           break;
@@ -1829,7 +1970,7 @@ export function streamAntigravity(
             if (next) {
               triedAccessTokens.add(next.token);
               creds = next;
-              requestHeaders = antigravityHeaders(creds.token);
+              requestHeaders = headersFor(creds.token);
               const switchedProject = creds.projectId ? null : await loadCodeAssist(creds.token);
               projectId = resolveProjectId({
                 token: creds.token,

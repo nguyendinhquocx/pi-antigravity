@@ -6,6 +6,7 @@ import type {
   ThinkingContent,
   ToolCall,
 } from "@earendil-works/pi-ai";
+import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type { GeminiRole, GeminiToolCallingMode, ThinkingEffort, ToolChoice } from "./enums.js";
 
 // OAuth & Auth Types
@@ -34,6 +35,8 @@ export type CallbackServer = {
 };
 
 // Model Types
+export type AntigravityModelConfig = Extract<ProviderModelConfig, { maxTokens: number }>;
+
 export type AntigravityRouting = {
   off?: string;
   routing?: Partial<Record<ThinkingEffort, string>>;
@@ -44,8 +47,9 @@ export type AntigravityRouting = {
 export const ANTIGRAVITY_API = "antigravity-api" as const;
 export type AntigravityApi = typeof ANTIGRAVITY_API;
 
-export type AntigravityStreamOptions = Omit<SimpleStreamOptions, "toolChoice"> & {
+export type AntigravityStreamOptions = Omit<SimpleStreamOptions, "toolChoice" | "reasoning"> & {
   toolChoice?: ToolChoice;
+  reasoning?: ThinkingEffort;
 };
 
 export type GeminiTextPart = { text: string; thoughtSignature?: string };
@@ -133,6 +137,7 @@ export type AntigravityGenerateRequest = {
   requestType: "agent";
   userAgent: "antigravity";
   requestId: string;
+  enabledCreditTypes?: string[];
 };
 
 export type StreamPart = {
@@ -169,6 +174,8 @@ export type StreamResponseData = {
 export type StreamChunk = StreamResponseData & {
   error?: { message?: string; code?: number };
   response?: StreamResponseData;
+  consumedCredits?: unknown;
+  remainingCredits?: unknown;
 };
 
 export type LooseImageBlock = {
@@ -212,10 +219,17 @@ export type ModelQuotaRow = {
   recommended?: boolean;
 };
 
+export type CreditBalanceInfo = {
+  creditType?: string;
+  creditAmount?: number;
+  minimumCreditAmountForUsage?: number;
+};
+
 export type TierInfo = {
   id?: string;
   name?: string;
   description?: string;
+  availableCredits?: CreditBalanceInfo[];
 };
 
 export type AccountUsage = {
@@ -225,6 +239,7 @@ export type AccountUsage = {
   productTier?: TierInfo;
   paidTier?: TierInfo;
   planLabel?: string;
+  availableCredits?: CreditBalanceInfo[];
   groups: QuotaGroup[];
   groupDescription?: string;
   /** Set when the (subscription-gated) quota-summary RPC was unavailable, e.g. free-tier SUBSCRIPTION_REQUIRED. */
@@ -273,6 +288,7 @@ export type ModelInfoRaw = {
   supportsThinking?: unknown;
   supportsImages?: unknown;
   recommended?: unknown;
+  disabled?: unknown;
   quotaInfo?: {
     remainingFraction?: unknown;
     resetTime?: unknown;
@@ -295,13 +311,26 @@ export type AvailableModelsRaw = {
   agentModelSorts?: AgentModelSort[];
 };
 
+export type CreditEntryRaw = {
+  creditType?: unknown;
+  credit_type?: unknown;
+  creditAmount?: unknown;
+  credit_amount?: unknown;
+  minimumCreditAmountForUsage?: unknown;
+  minimum_credit_amount_for_usage?: unknown;
+};
+
 export type TierRaw = {
   id?: unknown;
   name?: unknown;
   description?: unknown;
+  availableCredits?: CreditEntryRaw[];
+  available_credits?: CreditEntryRaw[];
 };
 
 export type LoadCodeAssistRaw = {
   currentTier?: TierRaw;
   paidTier?: TierRaw;
+  availableCredits?: CreditEntryRaw[];
+  available_credits?: CreditEntryRaw[];
 };
