@@ -199,7 +199,8 @@ export type QuotaBucket = {
   window?: string;
   resetTime?: string;
   description?: string;
-  remainingFraction: number;
+  /** undefined means the API did not return a value — unknown, not 0% remaining. */
+  remainingFraction?: number;
 };
 
 export type QuotaGroup = {
@@ -234,7 +235,8 @@ export type TierInfo = {
 
 export type AccountUsage = {
   projectId: string;
-  endpoint: string;
+  /** Endpoint that served the last successful metadata call; undefined when all failed. */
+  endpoint?: string;
   email?: string;
   productTier?: TierInfo;
   paidTier?: TierInfo;
@@ -244,10 +246,29 @@ export type AccountUsage = {
   groupDescription?: string;
   /** Set when the (subscription-gated) quota-summary RPC was unavailable, e.g. free-tier SUBSCRIPTION_REQUIRED. */
   quotaSummaryError?: string;
+  /** Set when every fetchAvailableModels endpoint failed; groups stay authoritative on their own. */
+  catalogError?: string;
   models: ModelQuotaRow[];
   defaultAgentModelId?: string;
   agentModelSorts?: unknown;
   fetchedAt: number;
+};
+
+/** One rendered account row of the multi-account usage report. */
+export type AccountUsageReport = {
+  /** Email when known, otherwise the store account id. */
+  label: string;
+  email?: string;
+  accountId?: string;
+  active: boolean;
+  usage?: AccountUsage;
+  /** Set when the account could not be queried at all (refresh/API failure, timeout). */
+  error?: string;
+};
+
+export type MultiAccountUsage = {
+  totalAccounts: number;
+  accounts: AccountUsageReport[];
 };
 
 export type ApiErrorBody = {

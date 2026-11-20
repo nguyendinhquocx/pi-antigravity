@@ -395,6 +395,7 @@ export async function loginAntigravity(
 
 export async function refreshAntigravityToken(
   credentials: OAuthCredentials,
+  signal?: AbortSignal,
 ): Promise<AntigravityOAuthCredentials> {
   // SDK hosts may use Node 26 built-in fetch with a separate Undici dispatcher.
   // Use Undici's fetch to keep response decompression on the same implementation.
@@ -407,6 +408,7 @@ export async function refreshAntigravityToken(
       refresh_token: credentials.refresh,
       grant_type: "refresh_token",
     }).toString(),
+    signal,
   });
   if (!response.ok) {
     throw new Error(

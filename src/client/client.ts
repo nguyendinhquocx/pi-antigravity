@@ -407,6 +407,34 @@ function catalogSignal(signal?: AbortSignal): AbortSignal {
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
+/**
+ * Merge a later endpoint's model record over an earlier one.
+ *
+ * Quota is pooled per model family and endpoints disagree on what they return:
+ * e.g. the daily endpoints carry Claude quotaInfo rows that cloudcode-pa omits.
+ * A whole-record overwrite would erase those values, so quotaInfo is merged
+ * field-wise — a value the later endpoint actually returned wins (including 0),
+ * while a missing/null quota field keeps the earlier endpoint's valid value.
+ * All non-quota metadata (display name, provider flags, model enum) still comes
+ * from the later record.
+ */
+function mergeModelRecord(
+  previous: Record<string, unknown>,
+  next: Record<string, unknown>,
+): Record<string, unknown> {
+  const prevQuota = isRecord(previous.quotaInfo) ? previous.quotaInfo : undefined;
+  const nextQuota = isRecord(next.quotaInfo) ? next.quotaInfo : undefined;
+  if (nextQuota && prevQuota) {
+    const mergedQuota: Record<string, unknown> = { ...prevQuota };
+    for (const [key, value] of Object.entries(nextQuota)) {
+      if (value !== undefined && value !== null) mergedQuota[key] = value;
+    }
+    return { ...next, quotaInfo: mergedQuota };
+  }
+  if (prevQuota) return { ...next, quotaInfo: prevQuota };
+  return { ...next };
+}
+
 /** Merge catalog payloads from one or more fetchAvailableModels responses. */
 export function mergeAvailableModelsResults(
   results: Array<{ endpoint: string; status: number; data: unknown } | undefined>,
@@ -433,7 +461,11 @@ export function mergeAvailableModelsResults(
     lastStatus = result.status;
     const data = result.data;
     if (isRecord(data) && isRecord(data.models)) {
-      Object.assign(mergedModels, data.models);
+      for (const [modelId, info] of Object.entries(data.models)) {
+        if (!info || !isRecord(info)) continue;
+        const existing = mergedModels[modelId];
+        mergedModels[modelId] = isRecord(existing) ? mergeModelRecord(existing, info) : { ...info };
+      }
       registerDiscoveredModelEnums(data.models as Record<string, { model?: unknown }>);
     }
     if (isRecord(data) && typeof data.defaultAgentModelId === "string") {

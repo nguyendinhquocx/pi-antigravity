@@ -247,9 +247,12 @@ export function listAccounts(): AccountSummary[] {
   }));
 }
 
-export async function ensureFresh(account: StoredAccount): Promise<StoredAccount> {
+export async function ensureFresh(
+  account: StoredAccount,
+  signal?: AbortSignal,
+): Promise<StoredAccount> {
   if (account.access && account.expires > Date.now() + REFRESH_SKEW_MS) return account;
-  return accountFromCredentials(await refreshAntigravityToken(account), account);
+  return accountFromCredentials(await refreshAntigravityToken(account, signal), account);
 }
 
 export function apiKeyFor(account: StoredAccount): AntigravityApiKey {

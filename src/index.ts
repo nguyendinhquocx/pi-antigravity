@@ -47,10 +47,12 @@ import {
 import { ANTIGRAVITY_API, streamAntigravity } from "./stream/index.js";
 import {
   fetchAccountUsage,
+  fetchMultiAccountUsage,
   fetchRemainingCredits,
   formatModelsList,
-  formatUsageSummary,
+  formatMultiAccountUsage,
   resolveApiKeyFromContext,
+  type MultiAccountUsage,
 } from "./usage/index.js";
 import {
   getCreditsStatus,
@@ -111,6 +113,34 @@ async function withUsage(
     if (ctx.hasUI) ctx.ui.notify("Fetching Antigravity usage…", "info");
     const usage = await runWithDiagnostics(() => fetchAccountUsage(apiKey));
     emitCommandOutput(ctx, fn(usage));
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    emitCommandOutput(ctx, `Antigravity usage failed: ${msg}`, "warning");
+  }
+}
+
+/**
+ * Per-account usage report for /antigravity.usage: every linked account in the
+ * store (active first), each rendered independently — one account's refresh,
+ * timeout or API failure never hides the others.
+ */
+async function withMultiAccountUsage(
+  ctx: ExtensionCommandContext,
+  format: (report: MultiAccountUsage) => string,
+): Promise<void> {
+  try {
+    const apiKey = await resolveApiKeyFromContext(ctx);
+    if (!apiKey) {
+      emitCommandOutput(
+        ctx,
+        "No Antigravity credentials. Run /login antigravity first.",
+        "warning",
+      );
+      return;
+    }
+    if (ctx.hasUI) ctx.ui.notify("Fetching Antigravity usage for all linked accounts…", "info");
+    const report = await runWithDiagnostics(() => fetchMultiAccountUsage(apiKey));
+    emitCommandOutput(ctx, format(report));
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     emitCommandOutput(ctx, `Antigravity usage failed: ${msg}`, "warning");
@@ -208,9 +238,10 @@ export default function (pi: ExtensionAPI): void {
   );
 
   pi.registerCommand("antigravity.usage", {
-    description: "Show Antigravity shared quota pools (Gemini / Claude+GPT, 5h + weekly)",
+    description:
+      "Show quota for every linked Antigravity account (paid buckets, family estimates for free tier)",
     handler: async (_args, ctx) => {
-      await withUsage(ctx, formatUsageSummary);
+      await withMultiAccountUsage(ctx, formatMultiAccountUsage);
     },
   });
 
