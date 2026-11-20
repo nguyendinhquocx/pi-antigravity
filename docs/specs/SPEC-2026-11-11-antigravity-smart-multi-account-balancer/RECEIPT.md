@@ -1,3 +1,16 @@
+---
+artifact_type: "spec-archive-receipt"
+spec_id: "SPEC-2026-11-11-antigravity-smart-multi-account-balancer"
+status: "archived"
+archived_at: "2026-11-20T19:39:17+07:00"
+source_file: "SPEC-2026-11-11-antigravity-smart-multi-account-balancer.md"
+source_sha256: "e6879e1ac843c205c68b74f2cf6c2d905e0084b76b98595ad5677008920da0a5"
+spec_file: "docs/specs/SPEC-2026-11-11-antigravity-smart-multi-account-balancer/SPEC.md"
+index_file: "docs/specs/INDEX.md"
+source_cleared: true
+implementation_ref: "052349f"
+---
+
 # RECEIPT: SPEC-2026-11-11 Antigravity Smart Multi-Account Balancer
 
 - **Status**: VERIFIED & PASS

@@ -1,3 +1,17 @@
+---
+artifact_type: "completed-spec"
+spec_id: "SPEC-2026-11-11-antigravity-smart-multi-account-balancer"
+status: "archived"
+title: "Smart Multi-Account Balancer cho Pi-Antigravity Extension (Rev 2 - Post-Review)"
+archived_at: "2026-11-20T19:39:17+07:00"
+source_file: "SPEC-2026-11-11-antigravity-smart-multi-account-balancer.md"
+source_sha256: "e6879e1ac843c205c68b74f2cf6c2d905e0084b76b98595ad5677008920da0a5"
+source_sha256_note: "legacy backfill: hash of archived SPEC body, original working source predates archive tooling"
+implementation_ref: "052349f"
+working_tree: "clean"
+related_paths: ["src/auth/balancer.ts", "src/auth/accounts.ts", "src/stream/stream.ts"]
+---
+
 # SPEC-2026-11-11: Smart Multi-Account Balancer cho Pi-Antigravity Extension (Rev 2 - Post-Review)
 
 > `status`: approved_by_reviewers  
