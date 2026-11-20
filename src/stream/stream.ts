@@ -1982,7 +1982,12 @@ export function streamAntigravity(
               emptyAttempt = -1;
               continue;
             }
-            throw new Error(friendly);
+            const linkedAccountCount = Object.keys(accountStore.accounts).length;
+            const failoverNote =
+              isKnownStoreToken && linkedAccountCount > 0
+                ? ` Account failover tried ${triedAccountIds.size}/${linkedAccountCount} linked accounts; no further eligible account was available.`
+                : "";
+            throw new Error(`${friendly}${failoverNote}`);
           }
           if (response?.status === 429 && isKnownStoreToken) {
             // Generic RESOURCE_EXHAUSTED (no reset hint) may be a per-account burst

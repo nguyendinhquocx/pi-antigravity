@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { resetBalancerState } from "../src/auth/balancer.js";
 import { streamAntigravity } from "../src/stream/stream.js";
 import { ANTIGRAVITY_MODELS } from "../src/models/index.js";
 
@@ -167,6 +168,51 @@ try {
   assert.ok(seenTokens.includes("token-b"), "capacity 429 rotated to the next account");
   const rotatedText = rotated.content.find((b) => b.type === "text");
   assert.equal(rotatedText?.type === "text" ? rotatedText.text : "", "served by second account");
+
+  // Recovery test 5: a hard per-account quota wall retries the next linked account.
+  resetBalancerState();
+  const quotaTokens: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    const token = String(headers.Authorization ?? "").replace("Bearer ", "");
+    quotaTokens.push(token);
+    if (token === "token-a") {
+      return new Response(
+        JSON.stringify({ error: { code: 429, message: "Individual quota reached. Resets in 113h21m12s", status: "RESOURCE_EXHAUSTED" } }),
+        { status: 429 },
+      );
+    }
+    return new Response('data: {"response":{"candidates":[{"content":{"parts":[{"text":"served after quota failover"}]},"finishReason":"STOP"}]}}\n\ndata: [DONE]\n\n');
+  }) as typeof fetch;
+  const quotaFailover = await streamAntigravity(
+    model,
+    { messages: [] },
+    { ...options, apiKey: JSON.stringify({ token: "token-a", projectId: "proj-a" }) },
+  ).result();
+  assert.equal(quotaFailover.stopReason, "stop", quotaFailover.errorMessage);
+  assert.ok(quotaTokens.includes("token-a"), "first account hit the hard quota wall");
+  assert.ok(quotaTokens.includes("token-b"), "hard quota wall rotated to another linked account");
+
+  // When every linked account hits the wall, make the tried-account count visible.
+  resetBalancerState();
+  const exhaustedTokens: string[] = [];
+  globalThis.fetch = (async (_url, init) => {
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    const token = String(headers.Authorization ?? "").replace("Bearer ", "");
+    exhaustedTokens.push(token);
+    return new Response(
+      JSON.stringify({ error: { code: 429, message: "Individual quota reached. Resets in 113h21m12s", status: "RESOURCE_EXHAUSTED" } }),
+      { status: 429 },
+    );
+  }) as typeof fetch;
+  const allQuotaExhausted = await streamAntigravity(
+    model,
+    { messages: [] },
+    { ...options, apiKey: JSON.stringify({ token: "token-a", projectId: "proj-a" }) },
+  ).result();
+  assert.equal(allQuotaExhausted.stopReason, "error");
+  assert.deepEqual([...new Set(exhaustedTokens)].sort(), ["token-a", "token-b"]);
+  assert.match(allQuotaExhausted.errorMessage ?? "", /2\/2 linked accounts/);
 } finally {
   globalThis.fetch = savedFetch;
   if (savedPrewarm === undefined) delete process.env.ANTIGRAVITY_NO_PREWARM;
