@@ -313,7 +313,7 @@ export const ANTIGRAVITY_MODELS: AntigravityModelConfig[] = [
     thinkingLevelMap: thinkingLevelMaps.thinking,
     input: ["text", "image"],
     cost: claudeOpusCost,
-    contextWindow: 250000,
+    contextWindow: 1048576,
     maxTokens: 64000,
   },
   {
@@ -323,7 +323,7 @@ export const ANTIGRAVITY_MODELS: AntigravityModelConfig[] = [
     thinkingLevelMap: thinkingLevelMaps.thinking,
     input: ["text", "image"],
     cost: claudeSonnetCost,
-    contextWindow: 200000,
+    contextWindow: 1048576,
     maxTokens: 64000,
   },
   {
