@@ -18,6 +18,7 @@ import { getCreditsStatus } from "../utils/credits.js";
 import { safeError } from "../utils/security.js";
 import { antigravityFetch } from "../utils/http.js";
 import { extractRecommendedModelIds } from "../models/grouping.js";
+import { detectModelFamily, type ModelFamily } from "../models/family.js";
 import type {
   AccountUsage,
   ApiErrorBody,
@@ -326,9 +327,61 @@ export async function fetchAccountUsage(apiKeyRaw?: string): Promise<AccountUsag
 
 function quotaErrorNote(msg: string): string {
   if (/SUBSCRIPTION_REQUIRED|#3501|(?:lack|missing).*license/i.test(msg)) {
-    return "Aggregate quota summary needs a paid subscription (free-tier can't use that endpoint). Per-model usage is still available via /antigravity.models.";
+    return "Aggregate quota summary needs a paid subscription; showing model-level quota data where the API returned it.";
   }
   return `Aggregate quota summary unavailable: ${msg.slice(0, 160)}`;
+}
+
+const MODEL_QUOTA_FAMILIES: Exclude<ModelFamily, "unknown">[] = ["gemini", "claude", "argon"];
+const MODEL_QUOTA_FAMILY_LABELS: Record<Exclude<ModelFamily, "unknown">, string> = {
+  gemini: "Gemini",
+  claude: "Claude/GPT",
+  argon: "Argon",
+};
+
+/** Free-tier accounts may lack aggregate groups but still return per-model quota.
+ *  Keep missing quota separate from numeric zero; never invent a family percent. */
+function formatModelQuotaFallback(models: ModelQuotaRow[]): string[] {
+  const byFamily = new Map<Exclude<ModelFamily, "unknown">, ModelQuotaRow[]>();
+  for (const model of models) {
+    const family = detectModelFamily(model.modelId);
+    if (family === "unknown") continue;
+    const rows = byFamily.get(family) ?? [];
+    rows.push(model);
+    byFamily.set(family, rows);
+  }
+
+  const lines: string[] = [];
+  for (const family of MODEL_QUOTA_FAMILIES) {
+    const familyModels = byFamily.get(family);
+    if (!familyModels?.length) continue;
+    const known = familyModels.filter((model) => model.remainingFraction !== undefined);
+    if (known.length === 0) {
+      lines.push(
+        `${MODEL_QUOTA_FAMILY_LABELS[family]}: quota values not returned by API (${familyModels.length} model${familyModels.length === 1 ? "" : "s"} listed).`,
+      );
+      continue;
+    }
+
+    lines.push(`${MODEL_QUOTA_FAMILY_LABELS[family]} model quota (may be family-shared):`);
+    for (const model of known) {
+      const remaining = remainingPercent(model.remainingFraction);
+      const displayName =
+        model.displayName && model.displayName !== model.modelId
+          ? `${model.modelId} (${model.displayName})`
+          : model.modelId;
+      lines.push(
+        `  ${progressBar(model.remainingFraction)} ${displayName}: ${remaining ?? "?"}% left · resets ${formatReset(model.resetTime)}`,
+      );
+    }
+    const missingCount = familyModels.length - known.length;
+    if (missingCount > 0) {
+      lines.push(
+        `  Quota value missing for ${missingCount} listed model${missingCount === 1 ? "" : "s"}.`,
+      );
+    }
+  }
+  return lines;
 }
 
 export function formatUsageSummary(usage: AccountUsage): string {
@@ -341,6 +394,12 @@ export function formatUsageSummary(usage: AccountUsage): string {
       lines.push(quotaErrorNote(usage.quotaSummaryError));
     } else {
       lines.push("No quota groups returned.");
+    }
+    const modelQuotaLines = formatModelQuotaFallback(usage.models);
+    if (modelQuotaLines.length > 0) {
+      lines.push("");
+      lines.push("Per-model quota data (missing values mean unknown, not 0% remaining):");
+      lines.push(...modelQuotaLines);
     }
     return lines.join("\n");
   }
