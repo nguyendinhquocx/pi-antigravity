@@ -337,6 +337,13 @@ export async function fetchAccountUsageForCredentials(
     fetchAvailableModelsCatalogSafe(token, initialProjectId, signal),
   ]);
 
+  // The safe wrappers swallow abort errors to keep summary/catalog independent;
+  // an abort here means the whole account blew its 30s deadline, which the UX
+  // contract renders as an unavailable account, not as empty-but-healthy data.
+  if (signal?.aborted) {
+    throw new Error("account query aborted: 30s deadline exceeded");
+  }
+
   // Derive project ID from the loadCodeAssist response or stored project ID.
   const discoveredProject = assistResult ? extractProjectId(assistResult.data) : undefined;
   const projectId = resolveProjectId({
@@ -441,9 +448,7 @@ function familyResetText(tiedResetTimes: Array<string | undefined>): string {
   const stamps = tiedResetTimes.map(parseResetTimestamp);
   const valid = stamps.filter((ts): ts is number => ts !== undefined);
   if (valid.length === 0) return "reset unknown";
-  if (valid.length !== stamps.length) {
-    return tiedResetTimes.length === 1 ? "reset unknown" : "reset varies/unknown";
-  }
+  if (valid.length !== stamps.length) return "reset varies/unknown";
   if (new Set(valid).size !== 1) return "reset varies/unknown";
   return `reset ~${relativeReset(valid[0])}`;
 }
@@ -625,9 +630,11 @@ function queueRotationPersist(
   const task = rotationPersistChain.then(() => {
     try {
       updateRememberedAccount(previous, fresh);
-    } catch {
+    } catch (error) {
       // Best-effort persistence (e.g. transient file lock on Windows): the
-      // in-memory token still serves this report.
+      // in-memory token still serves this report. Surface it for diagnostics —
+      // a silently dropped rotation can dead the account on the next refresh.
+      setLastError(`account rotation persist failed: ${safeError(error)}`);
     }
   });
   rotationPersistChain = task.catch(() => {});
@@ -686,6 +693,12 @@ async function buildAccountUsageReport(
  * concurrency; each has its own 30s deadline, so one stalled refresh or API call
  * only marks that account unavailable and never drops the others. With no
  * linked accounts at all, falls back to the current ModelRegistry credential.
+ *
+ * When called without an active credential while the store still has an active
+ * row, that row falls back to the store path (ensureFresh + row-wise rotation
+ * persist). This never touches auth.json or the active id — but callers outside
+ * /antigravity.usage should pass the ModelRegistry credential to keep the
+ * active account on the Pi-managed rotation path.
  */
 export async function fetchMultiAccountUsage(
   activeApiKeyRaw?: string,

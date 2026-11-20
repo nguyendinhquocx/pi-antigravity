@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -103,6 +103,21 @@ const agreed = formatFamilyQuotaLines([
 ]);
 assert.ok(agreed.join("\n").includes("reset ~6d"), agreed.join("\n"));
 assert.ok(!agreed.join("\n").includes("varies"), agreed.join("\n"));
+
+// tied minimums with mixed valid/invalid resets -> varies/unknown
+const mixedValidity = formatFamilyQuotaLines([
+  { modelId: "claude-a", remainingFraction: 0.1, resetTime: NEAR_RESET },
+  { modelId: "claude-b", remainingFraction: 0.1, resetTime: "not-a-date" },
+]);
+assert.ok(mixedValidity.join("\n").includes("reset varies/unknown"), mixedValidity.join("\n"));
+
+// tied minimums with no parseable reset at all -> reset unknown
+const allInvalid = formatFamilyQuotaLines([
+  { modelId: "claude-a", remainingFraction: 0.1, resetTime: "not-a-date" },
+  { modelId: "claude-b", remainingFraction: 0.1 },
+]);
+assert.ok(allInvalid.join("\n").includes("reset unknown"), allInvalid.join("\n"));
+assert.ok(!allInvalid.join("\n").includes("varies"), allInvalid.join("\n"));
 
 // a reset already in the past renders as "now" but the percent still shows
 const past = formatFamilyQuotaLines([
@@ -341,6 +356,24 @@ assert.equal(
 assert.equal(mergedModels["gemini-a"]?.displayName, "Gemini A v2");
 assert.equal(mergedModels["claude-new"]?.quotaInfo?.remainingFraction, 0.9);
 assert.equal(merged.data.defaultAgentModelId, "claude-new");
+// A later endpoint returning null for a quota field counts as missing: keep
+// the earlier valid value instead of erasing it.
+const nulledLater = mergeAvailableModelsResults([
+  dailyResult,
+  {
+    endpoint: "https://cloudcode-pa.googleapis.com",
+    status: 200,
+    data: {
+      models: { "claude-x": { displayName: "Claude X", quotaInfo: { remainingFraction: null } } },
+    },
+  },
+]);
+const nulledModels = nulledLater.data.models as Record<
+  string,
+  { quotaInfo?: { remainingFraction?: number } }
+>;
+assert.equal(nulledModels["claude-x"]?.quotaInfo?.remainingFraction, 0.5);
+
 // A later endpoint returning an explicit 0 replaces the earlier value.
 const zeroedLater = mergeAvailableModelsResults([
   dailyResult,
@@ -478,8 +511,5 @@ async function runMultiAccountStoreTest(): Promise<void> {
 }
 
 await runMultiAccountStoreTest();
-
-// The temp store fixture must be gone; nothing else depends on the env var.
-assert.ok(!existsSync(join(tmpdir(), "antigravity-usage-test-")));
 
 console.log("Usage formatter tests passed!");
