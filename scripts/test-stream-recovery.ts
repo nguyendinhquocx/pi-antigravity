@@ -8,7 +8,13 @@ import { ANTIGRAVITY_MODELS } from "../src/models/index.js";
 
 const savedFetch = globalThis.fetch;
 const savedPrewarm = process.env.ANTIGRAVITY_NO_PREWARM;
+const savedEnterprise = process.env.ANTIGRAVITY_ENTERPRISE;
+const savedLocation = process.env.ANTIGRAVITY_LOCATION;
 process.env.ANTIGRAVITY_NO_PREWARM = "1";
+// Force consumer mode so a developer's local Enterprise CLI settings cannot
+// redirect the mocked endpoint fallback assertions.
+process.env.ANTIGRAVITY_ENTERPRISE = "0";
+process.env.ANTIGRAVITY_LOCATION = "global";
 const bodies: any[] = [];
 const model = { ...ANTIGRAVITY_MODELS[0], api: "antigravity", provider: "antigravity" } as Model<Api>;
 const options = { apiKey: JSON.stringify({ token: "test", projectId: "test-project" }), sessionId: "recovery-test" };
@@ -19,6 +25,8 @@ try {
     if (++calls === 1) throw new Error("fetch failed");
     return new Response('data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}}\n\ndata: [DONE]\n\n');
   }) as typeof fetch;
+  // Regression: consumer mode still binds enterpriseTarget and must not throw
+  // ReferenceError before reaching the mocked fetch.
   const first = await streamAntigravity(model, { messages: [] }, options).result();
   assert.equal(first.stopReason, "stop", first.errorMessage);
   assert.equal(calls, 2, "transport errors try the next endpoint");
@@ -68,11 +76,10 @@ try {
   // Recovery test 3: generic RESOURCE_EXHAUSTED 429 on gemini-3.8-flash-high degrades
   // within the same generation (-medium then -low) instead of failing the turn.
   const capacityModels: string[] = [];
-  let capacityCalls = 0;
   globalThis.fetch = (async (_url, init) => {
     const body = JSON.parse(String(init?.body));
     capacityModels.push(body.model);
-    if (++capacityCalls <= 2) {
+    if (body.model.endsWith("-high") || body.model.endsWith("-medium")) {
       return new Response(
         JSON.stringify({ error: { code: 429, message: "Resource has been exhausted (e.g. check quota).", status: "RESOURCE_EXHAUSTED" } }),
         { status: 429 },
@@ -88,6 +95,10 @@ try {
   assert.equal(fallbackServed.stopReason, "stop");
   assert.deepEqual(capacityModels, [
     "gemini-3.8-flash-high",
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-medium",
     "gemini-3.8-flash-medium",
     "gemini-3.8-flash-low",
   ]);
@@ -160,5 +171,9 @@ try {
   globalThis.fetch = savedFetch;
   if (savedPrewarm === undefined) delete process.env.ANTIGRAVITY_NO_PREWARM;
   else process.env.ANTIGRAVITY_NO_PREWARM = savedPrewarm;
+  if (savedEnterprise === undefined) delete process.env.ANTIGRAVITY_ENTERPRISE;
+  else process.env.ANTIGRAVITY_ENTERPRISE = savedEnterprise;
+  if (savedLocation === undefined) delete process.env.ANTIGRAVITY_LOCATION;
+  else process.env.ANTIGRAVITY_LOCATION = savedLocation;
 }
 console.log("stream recovery: endpoint fallback, fresh identity, transport errors and cancellation passed");

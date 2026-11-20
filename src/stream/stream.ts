@@ -1708,6 +1708,7 @@ export function streamAntigravity(
     const startTime = Date.now();
     const output = createOutput(model);
     try {
+      const enterpriseTarget = resolveEnterpriseTarget();
       let creds = parseApiKey(opts.apiKey);
       const triedAccountIds = new Set<string>();
       const triedAccessTokens = new Set<string>();
