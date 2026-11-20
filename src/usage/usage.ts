@@ -312,6 +312,51 @@ export async function fetchAccountUsage(
 }
 
 /**
+ * retrieveUserQuota returns the per-model weekly quota buckets the CLI renders
+ * in its Models & Quota panel. Unlike the model catalog — whose quotaInfo rows
+ * can stay optimistic while a weekly group is exhausted — these numbers match
+ * what generation-time 429s enforce (remainingFraction 0 + a weekly resetTime),
+ * and the RPC works for free-tier accounts. Requires the account's project id.
+ */
+export function parseUserQuotaModels(data: unknown): ModelQuotaRow[] {
+  const raw = isRecord(data) ? data : {};
+  const buckets = Array.isArray(raw.buckets) ? raw.buckets : [];
+  const models: ModelQuotaRow[] = [];
+  for (const bucket of buckets) {
+    if (!bucket || !isRecord(bucket)) continue;
+    const modelId = typeof bucket.modelId === "string" ? bucket.modelId : "";
+    if (!modelId || /^(tab_|chat_)/i.test(modelId)) continue;
+    models.push({
+      modelId,
+      remainingFraction: clampFraction(bucket.remainingFraction),
+      resetTime: bucket.resetTime ? String(bucket.resetTime) : undefined,
+    });
+  }
+  models.sort((a, b) => a.modelId.localeCompare(b.modelId));
+  return models;
+}
+
+async function fetchUserQuotaSafe(
+  token: string,
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<{ ok: true; data: unknown } | { ok: false; error: string }> {
+  try {
+    const result = await postJson(
+      "/v1internal:retrieveUserQuota",
+      token,
+      { project: projectId },
+      signal,
+    );
+    return { ok: true, data: result.data };
+  } catch (error) {
+    const msg = safeError(error);
+    setLastError(msg);
+    return { ok: false, error: msg };
+  }
+}
+
+/**
  * Core per-account usage load. The quota-summary RPC, the model catalog and
  * loadCodeAssist stay independent: a catalog failure must never hide an
  * authoritative paid summary, and a summary failure must not block the
@@ -329,11 +374,12 @@ export async function fetchAccountUsageForCredentials(
       credentialProjectId: creds.projectId,
     });
 
-  // Fetch loadCodeAssist, quota summary, and available models all in parallel
-  // to minimize command execution latency.
-  const [assistResult, summaryRes, catalogResult] = await Promise.all([
+  // Fetch loadCodeAssist, quota summary, user quota, and available models all
+  // in parallel to minimize command execution latency.
+  const [assistResult, summaryRes, userQuotaRes, catalogResult] = await Promise.all([
     loadCodeAssistSafe(token, signal),
     fetchQuotaSummarySafe(token, signal),
+    fetchUserQuotaSafe(token, initialProjectId, signal),
     fetchAvailableModelsCatalogSafe(token, initialProjectId, signal),
   ]);
 
@@ -392,6 +438,8 @@ export async function fetchAccountUsageForCredentials(
     groupDescription: description,
     quotaSummaryError,
     catalogError: catalogResult.ok ? undefined : catalogResult.error,
+    userQuotaModels: parseUserQuotaModels(userQuotaRes.ok ? userQuotaRes.data : undefined),
+    userQuotaError: userQuotaRes.ok ? undefined : userQuotaRes.error,
     models,
     defaultAgentModelId,
     agentModelSorts,
@@ -425,10 +473,14 @@ async function fetchAvailableModelsCatalogSafe(
 }
 
 function quotaErrorNote(msg: string): string {
-  if (/SUBSCRIPTION_REQUIRED|#3501|(?:lack|missing).*license/i.test(msg)) {
+  if (isSubscriptionGateError(msg)) {
     return "Aggregate quota summary needs a paid subscription; showing model-level quota data where the API returned it.";
   }
   return `Aggregate quota summary unavailable: ${msg.slice(0, 160)}`;
+}
+
+function isSubscriptionGateError(msg: string): boolean {
+  return /SUBSCRIPTION_REQUIRED|#3501|(?:lack|missing).*license/i.test(msg);
 }
 
 const MODEL_QUOTA_FAMILIES: Exclude<ModelFamily, "unknown">[] = ["gemini", "claude", "argon"];
@@ -485,6 +537,47 @@ export function formatFamilyQuotaLines(models: ModelQuotaRow[]): string[] {
     const percent = remainingPercent(tightest);
     lines.push(
       `${label} shared · ${percent ?? "?"}% remaining · ${familyResetText(tied.map((m) => m.resetTime))} · derived from ${known.length}/${familyModels.length} models`,
+    );
+  }
+  return lines;
+}
+
+/**
+ * Compact per-family lines for the multi-account report. One short line per
+ * family; provenance appears only when the source returned a partial set, and
+ * a family whose rows carry no values renders "no data" instead of 0%.
+ */
+export function formatCompactFamilyQuotaLines(
+  models: ModelQuotaRow[],
+  opts?: { source?: "server" | "catalog" },
+): string[] {
+  const byFamily = new Map<Exclude<ModelFamily, "unknown">, ModelQuotaRow[]>();
+  for (const model of models) {
+    const family = detectModelFamily(model.modelId);
+    if (family === "unknown") continue;
+    const rows = byFamily.get(family) ?? [];
+    rows.push(model);
+    byFamily.set(family, rows);
+  }
+
+  const sourceSuffix = opts?.source === "catalog" ? " · catalog estimate" : "";
+  const lines: string[] = [];
+  for (const family of MODEL_QUOTA_FAMILIES) {
+    const familyModels = byFamily.get(family);
+    if (!familyModels?.length) continue;
+    const label = MODEL_QUOTA_FAMILY_LABELS[family];
+    const known = familyModels.filter((model) => model.remainingFraction !== undefined);
+    if (known.length === 0) {
+      lines.push(`${label} ?% · no data`);
+      continue;
+    }
+    const tightest = Math.min(...known.map((model) => model.remainingFraction as number));
+    const tied = known.filter((model) => model.remainingFraction === tightest);
+    const percent = remainingPercent(tightest);
+    const provenance =
+      known.length < familyModels.length ? ` · ${known.length}/${familyModels.length} models` : "";
+    lines.push(
+      `${label} shared ${percent ?? "?"}% · ${familyResetText(tied.map((m) => m.resetTime))}${provenance}${sourceSuffix}`,
     );
   }
   return lines;
@@ -747,6 +840,58 @@ export async function fetchMultiAccountUsage(
 
 /** Render the per-account quota report described by the UX contract. */
 export function formatMultiAccountUsage(report: MultiAccountUsage): string {
+  const blocks: string[][] = [];
+  let anyFallback = false;
+
+  for (const account of report.accounts) {
+    const block: string[] = [];
+    const marker = account.active ? "*" : " ";
+    const name = account.label || account.accountId || "unknown account";
+    if (!account.usage) {
+      block.push(`${marker} ${name} — unavailable: ${account.error || "no usage data"}`);
+      blocks.push(block);
+      continue;
+    }
+    const usage = account.usage;
+    block.push(`${marker} ${name}${usage.planLabel ? ` — ${usage.planLabel}` : ""}`);
+
+    if (usage.groups.length > 0) {
+      // Authoritative paid summary; fallback data stays out of the way.
+      for (const group of usage.groups) {
+        block.push(`  ${group.displayName}`);
+        for (const bucket of group.buckets) {
+          const rem = remainingPercent(bucket.remainingFraction);
+          block.push(
+            `    ${progressBar(bucket.remainingFraction)} ${bucket.displayName}: ${rem ?? "?"}% left · resets ${formatReset(bucket.resetTime)}`,
+          );
+        }
+      }
+      blocks.push(block);
+      continue;
+    }
+
+    // Free tier: prefer the authoritative retrieveUserQuota buckets; fall back
+    // to merged model-catalog quota only when the server returned nothing.
+    const serverLines = formatCompactFamilyQuotaLines(usage.userQuotaModels ?? []);
+    const familyLines = serverLines.length
+      ? serverLines
+      : formatCompactFamilyQuotaLines(usage.models, { source: "catalog" });
+    if (familyLines.length > 0) {
+      block.push(...familyLines.map((line) => `  ${line}`));
+      anyFallback = true;
+    } else if (usage.userQuotaError && usage.catalogError) {
+      block.push(`  Quota unavailable: ${usage.userQuotaError.slice(0, 120)}`);
+    } else if (usage.catalogError) {
+      block.push(`  Model catalog unavailable: ${usage.catalogError.slice(0, 120)}`);
+    } else {
+      block.push("  No quota data returned.");
+    }
+    if (usage.quotaSummaryError && !isSubscriptionGateError(usage.quotaSummaryError)) {
+      block.push(`  Aggregate quota unavailable: ${usage.quotaSummaryError.slice(0, 120)}`);
+    }
+    blocks.push(block);
+  }
+
   const lines: string[] = [];
   const count = report.totalAccounts;
   lines.push(
@@ -754,48 +899,13 @@ export function formatMultiAccountUsage(report: MultiAccountUsage): string {
       ? "Antigravity quota (1 linked account)"
       : `Antigravity quota across ${count} linked accounts`,
   );
-
-  for (const account of report.accounts) {
-    lines.push("");
-    const marker = account.active ? "*" : " ";
-    const name = account.label || account.accountId || "unknown account";
-    if (!account.usage) {
-      const reason = account.error || "no usage data";
-      lines.push(`${marker} ${name} — unavailable: ${reason}`);
-      continue;
-    }
-    const usage = account.usage;
-    lines.push(`${marker} ${name}${usage.planLabel ? ` — ${usage.planLabel}` : ""}`);
-
-    if (usage.groups.length > 0) {
-      // Authoritative paid summary; the model-catalog fallback stays out of the way.
-      for (const group of usage.groups) {
-        lines.push(`  ${group.displayName}`);
-        for (const bucket of group.buckets) {
-          const rem = remainingPercent(bucket.remainingFraction);
-          lines.push(
-            `    ${progressBar(bucket.remainingFraction)} ${bucket.displayName}: ${rem ?? "?"}% left · resets ${formatReset(bucket.resetTime)}`,
-          );
-        }
-      }
-      continue;
-    }
-
-    if (usage.quotaSummaryError) {
-      lines.push(`  ${quotaErrorNote(usage.quotaSummaryError)}`);
-    } else {
-      lines.push("  No aggregate quota groups returned.");
-    }
-    const familyLines = formatFamilyQuotaLines(usage.models);
-    if (familyLines.length > 0) {
-      lines.push(...familyLines.map((line) => `  ${line}`));
-    } else if (usage.catalogError) {
-      lines.push(`  Model catalog unavailable: ${usage.catalogError.slice(0, 120)}`);
-    } else {
-      lines.push("  No model quota data returned.");
-    }
+  if (anyFallback) {
+    lines.push("Weekly quota per family; ?% = no data (not exhausted).");
   }
-
+  for (const block of blocks) {
+    lines.push("");
+    lines.push(...block);
+  }
   return lines.join("\n");
 }
 

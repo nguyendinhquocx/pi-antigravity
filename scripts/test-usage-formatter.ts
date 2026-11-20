@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   fetchMultiAccountUsage,
+  formatCompactFamilyQuotaLines,
   formatFamilyQuotaLines,
   formatMultiAccountUsage,
   formatUsageSummary,
+  parseUserQuotaModels,
 } from "../src/usage/usage.js";
 import { mergeAvailableModelsResults } from "../src/client/client.js";
 
@@ -231,12 +233,14 @@ assert.ok(multiOut.includes("Week: 60% left"), multiOut);
 // Missing bucket fraction stays unknown, not 0%; a real numeric zero still renders as exhausted.
 assert.ok(multiOut.includes("5H: ?% left"), multiOut);
 assert.ok(multiOut.includes("5H: 0% left"), multiOut);
-// Free account: family lines only, no model ids, catalog error surfaced.
-assert.ok(multiOut.includes("Gemini shared · 100% remaining"), multiOut);
-assert.ok(multiOut.includes("derived from 2/2 models"), multiOut);
-assert.ok(multiOut.includes("Claude/GPT: quota unavailable (0/2 models returned values)"), multiOut);
+// Free account: compact family lines from the catalog fallback (server quota absent).
+assert.ok(multiOut.includes("Gemini shared 100% · reset"), multiOut);
+assert.ok(multiOut.includes("· catalog estimate"), multiOut);
+assert.ok(!multiOut.includes("derived from"), multiOut);
+assert.ok(multiOut.includes("Claude/GPT ?% · no data"), multiOut);
 assert.ok(!multiOut.includes("gemini-a"), multiOut);
-assert.ok(multiOut.includes("needs a paid subscription"), multiOut);
+assert.ok(!multiOut.includes("needs a paid subscription"), multiOut);
+assert.ok(multiOut.includes("Weekly quota per family; ?% = no data (not exhausted)."), multiOut);
 // Catalog error surfaces only when no family data could be rendered at all.
 const catalogDownNoFamilies = formatMultiAccountUsage({
   totalAccounts: 1,
@@ -275,6 +279,86 @@ const paidCatalogDown = formatMultiAccountUsage({
 });
 assert.ok(paidCatalogDown.includes("Week: 60% left"), paidCatalogDown);
 assert.ok(!paidCatalogDown.includes("Model catalog unavailable"), paidCatalogDown);
+
+// Free account with authoritative retrieveUserQuota buckets: exhausted Gemini
+// renders as a real 0% with the weekly reset, and optimistic catalog rows lose.
+const serverQuotaOut = formatMultiAccountUsage({
+  totalAccounts: 1,
+  accounts: [
+    {
+      label: "free@example.com",
+      accountId: "free",
+      active: true,
+      usage: {
+        ...baseUsage,
+        planLabel: "Antigravity Starter Quota (free-tier)",
+        quotaSummaryError: message3501,
+        userQuotaModels: [
+          { modelId: "claude-opus-4-6-thinking", remainingFraction: 0.2245, resetTime: FUTURE_RESET },
+          { modelId: "claude-sonnet-4-6", remainingFraction: 0.2245, resetTime: FUTURE_RESET },
+          { modelId: "gemini-3.8-flash-tiered", remainingFraction: 0, resetTime: FUTURE_RESET },
+          { modelId: "gemini-2.5-pro", remainingFraction: 0, resetTime: FUTURE_RESET },
+          { modelId: "tab_flash_lite_preview", remainingFraction: 1 },
+        ],
+        models: [{ modelId: "gemini-a", remainingFraction: 1, resetTime: FUTURE_RESET }],
+      },
+    },
+  ],
+});
+assert.ok(serverQuotaOut.includes("Gemini shared 0% · reset"), serverQuotaOut);
+assert.ok(serverQuotaOut.includes("Claude/GPT shared 22.5% · reset"), serverQuotaOut);
+assert.ok(!serverQuotaOut.includes("catalog estimate"), serverQuotaOut);
+assert.ok(!serverQuotaOut.includes("shared ?%"), serverQuotaOut);
+assert.ok(!serverQuotaOut.includes("?% · no data"), serverQuotaOut);
+assert.ok(!serverQuotaOut.includes("gemini-a"), serverQuotaOut);
+assert.ok(!serverQuotaOut.includes("needs a paid subscription"), serverQuotaOut);
+assert.ok(serverQuotaOut.includes("Weekly quota per family"), serverQuotaOut);
+
+// Partial server data keeps explicit provenance so unknown rows stay visibly unknown.
+const partialServerOut = formatMultiAccountUsage({
+  totalAccounts: 1,
+  accounts: [
+    {
+      label: "partial@example.com",
+      accountId: "partial",
+      active: false,
+      usage: {
+        ...baseUsage,
+        userQuotaModels: [{ modelId: "gemini-a", remainingFraction: 0.5, resetTime: FUTURE_RESET }, { modelId: "gemini-b" }],
+      },
+    },
+  ],
+});
+assert.ok(partialServerOut.includes("Gemini shared 50% · reset"), partialServerOut);
+assert.ok(partialServerOut.includes("· 1/2 models"), partialServerOut);
+
+// --- parseUserQuotaModels: tab/chat rows dropped, zero kept, invalid rows skipped ---
+const parsedUserQuota = parseUserQuotaModels({
+  buckets: [
+    { modelId: "gemini-3.8-flash-tiered", remainingFraction: 0, resetTime: "2026-11-25T02:38:30Z" },
+    { modelId: "claude-sonnet-4-6", remainingFraction: 0.224503, resetTime: "2026-11-25T02:37:44Z" },
+    { modelId: "tab_flash_lite_preview", remainingFraction: 1 },
+    { modelId: "chat_default", remainingFraction: 1 },
+    { modelId: "", remainingFraction: 1 },
+    { remainingFraction: 0.5 },
+    "junk",
+  ],
+});
+assert.equal(parsedUserQuota.length, 2, JSON.stringify(parsedUserQuota));
+assert.equal(parsedUserQuota[0]?.modelId, "claude-sonnet-4-6");
+assert.equal(parsedUserQuota[0]?.remainingFraction, 0.224503);
+assert.equal(parsedUserQuota[1]?.modelId, "gemini-3.8-flash-tiered");
+assert.equal(parsedUserQuota[1]?.remainingFraction, 0);
+assert.equal(parsedUserQuota[1]?.resetTime, "2026-11-25T02:38:30Z");
+assert.equal(parseUserQuotaModels(undefined).length, 0);
+assert.equal(parseUserQuotaModels({ buckets: null }).length, 0);
+
+// --- formatCompactFamilyQuotaLines: no-data family and non-quota families skip ---
+const compactNoData = formatCompactFamilyQuotaLines([
+  { modelId: "gemini-a" },
+  { modelId: "some-unknown-model", remainingFraction: 0.3 },
+]);
+assert.deepEqual(compactNoData, ["Gemini ?% · no data"], compactNoData.join("\n"));
 
 // Seven linked accounts: seven headings, active first (fetchMultiAccountUsage
 // already orders accounts; the formatter renders the report as-is), stable order after.

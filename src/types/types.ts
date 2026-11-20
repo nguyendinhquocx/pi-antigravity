@@ -248,6 +248,10 @@ export type AccountUsage = {
   quotaSummaryError?: string;
   /** Set when every fetchAvailableModels endpoint failed; groups stay authoritative on their own. */
   catalogError?: string;
+  /** Per-model weekly quota buckets from retrieveUserQuota (authoritative for free tier). */
+  userQuotaModels?: ModelQuotaRow[];
+  /** Set when the retrieveUserQuota RPC failed on every endpoint. */
+  userQuotaError?: string;
   models: ModelQuotaRow[];
   defaultAgentModelId?: string;
   agentModelSorts?: unknown;

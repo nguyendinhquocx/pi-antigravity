@@ -111,7 +111,7 @@ Review these permissions before approving access. If your credentials expire or 
 | --- | --- |
 | `/login antigravity` | Sign in to Google and configure the provider. |
 | `/model antigravity/<model-id>` | Choose a registered Antigravity model. |
-| `/antigravity.usage` | Show quota for every linked account (active first): paid accounts render aggregate buckets, free-tier accounts get one estimate line per model family; missing values stay unknown, a failed account never hides the others. |
+| `/antigravity.usage` | Show quota for every linked account (active first): paid accounts render aggregate buckets, free-tier accounts render the authoritative weekly `retrieveUserQuota` buckets as one short line per family (model catalog only as fallback); missing values stay unknown, a failed account never hides the others. |
 | `/antigravity.models` | List available runtime models, remaining shared-pool quota, and capabilities. |
 | `/antigravity.accounts` | List linked accounts; use `switch` or `remove` with an index or email to manage them. |
 | `/antigravity.credits [on\|off]` | Check or toggle automatic fallback to AI credits when standard quotas are exhausted. |
