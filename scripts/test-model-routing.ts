@@ -896,6 +896,23 @@ assert.equal(getFallbackRuntimeModel("gemini-3.6-flash-low"), undefined);
 assert.equal(getFallbackRuntimeModel("claude-sonnet-4-6"), undefined);
 
 // Test buildRequest output token clamping
+const savedInlineEnv = {
+  ANTIGRAVITY_INLINE_SYSTEM: process.env.ANTIGRAVITY_INLINE_SYSTEM,
+  NOAGY_INLINE_SYSTEM: process.env.NOAGY_INLINE_SYSTEM,
+  ANTIGRAVITY_PROMPT_GUARD: process.env.ANTIGRAVITY_PROMPT_GUARD,
+  NOAGY_PROMPT_GUARD: process.env.NOAGY_PROMPT_GUARD,
+};
+delete process.env.ANTIGRAVITY_INLINE_SYSTEM;
+delete process.env.NOAGY_INLINE_SYSTEM;
+delete process.env.ANTIGRAVITY_PROMPT_GUARD;
+delete process.env.NOAGY_PROMPT_GUARD;
+process.on("exit", () => {
+  for (const [key, value] of Object.entries(savedInlineEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
+
 const dummyContext: Context = {
   messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
 };
@@ -1214,6 +1231,85 @@ assert.ok(
   convertedMultimodal[2]?.parts.some((p) => "inlineData" in p && p.inlineData.mimeType === "image/png"),
 );
 
+// Claude / GPT-OSS require every functionResponse in a user turn to appear contiguously
+// before any inlineData/text parts, and require a matching functionResponse even when an
+// earlier toolCall turn was interrupted before its toolResult was recorded (#156, #157).
+const claudeParallelImageAndOrphanedToolContext = {
+  messages: [
+    { role: "user", content: "inspect screenshots", timestamp: Date.now() },
+    {
+      role: "assistant",
+      content: [
+        { type: "toolCall", id: "call-img-1", name: "read", arguments: { path: "a.png" } },
+        { type: "toolCall", id: "call-img-2", name: "read", arguments: { path: "b.png" } },
+      ],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "claude-sonnet-4-6",
+      usage: zeroUsage,
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call-img-1",
+      toolName: "read",
+      content: [
+        { type: "text", text: "Read image file [image/png]" },
+        { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+      ],
+      isError: false,
+      timestamp: Date.now(),
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call-img-2",
+      toolName: "read",
+      content: [
+        { type: "text", text: "Read image file [image/png]" },
+        { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+      ],
+      isError: false,
+      timestamp: Date.now(),
+    },
+    {
+      role: "assistant",
+      content: [
+        { type: "toolCall", id: "call-orphaned", name: "bash", arguments: { command: "echo ok" } },
+      ],
+      api: "antigravity-api",
+      provider: "antigravity",
+      model: "claude-sonnet-4-6",
+      usage: zeroUsage,
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    },
+    { role: "user", content: "continue", timestamp: Date.now() },
+  ],
+} as unknown as Context;
+const convertedClaudeParallel = convertMessages(
+  { ...model, id: "claude-sonnet-4-6", maxTokens: 64000 },
+  claudeParallelImageAndOrphanedToolContext,
+  "claude-sonnet-4-6",
+);
+assert.equal(convertedClaudeParallel.length, 5);
+assert.deepEqual(
+  convertedClaudeParallel[2]?.parts.map((p) =>
+    "functionResponse" in p
+      ? `fr:${p.functionResponse.id}`
+      : "inlineData" in p
+        ? "img"
+        : "text",
+  ),
+  ["fr:call-img-1", "fr:call-img-2", "img", "img"],
+);
+assert.deepEqual(
+  convertedClaudeParallel[4]?.parts.map((p) =>
+    "functionResponse" in p ? `fr:${p.functionResponse.id}` : "text",
+  ),
+  ["fr:call-orphaned", "text"],
+);
+
 const crossThinkingContext = {
   messages: [
     { role: "user", content: "hi", timestamp: Date.now() },
@@ -1320,11 +1416,14 @@ const degradedPromptReq = buildRequest(
   {},
   geminiRuntime,
 );
-assert.equal(degradedPromptReq.request.systemInstruction.parts.length, 2);
-assert.match(
-  degradedPromptReq.request.systemInstruction.parts[1]?.text || "",
-  /never simulate tool calls/i,
-);
+// The no-preamble guard is appended after the prompt, so the assembled parts exceed the
+// 126-char consumer cap and fold into `contents` while keeping all instruction text intact.
+const degradedSystemText = (
+  degradedPromptReq.request.systemInstruction?.parts ?? degradedPromptReq.request.contents[0]?.parts ?? []
+)
+  .map((part) => ("text" in part ? part.text : ""))
+  .join("\n");
+assert.match(degradedSystemText, /never simulate tool calls/i);
 const lastDegradedTurn = degradedPromptReq.request.contents.at(-1);
 assert.equal(lastDegradedTurn?.role, "user");
 assert.match(JSON.stringify(lastDegradedTurn?.parts.at(-1)), /emit a real functionCall/);
@@ -1544,7 +1643,8 @@ assert.ok(
   "flat systemPrompt must ship inside the leading user turn",
 );
 
-// Pi default prompt fingerprints that trigger false 429 RESOURCE_EXHAUSTED are neutralized (#137, #139).
+// Pi default prompt fingerprints that trigger false 429 RESOURCE_EXHAUSTED are neutralized (#137, #139, #145, #147, #155).
+// The opener is rewritten as a whole sentence group so native systemInstruction passes too.
 const defaultPiHarnessPrompt = buildRequest(
   flash37Model,
   {
@@ -1557,8 +1657,86 @@ const defaultPiHarnessPrompt = buildRequest(
   "gemini-3.7-flash-low",
 );
 assert.equal(
-  defaultPiHarnessPrompt.request.systemInstruction.parts[0]?.text,
-  "You are a coding assistant running inside your development environment. Help users inspect files, run commands, and modify code.",
+  defaultPiHarnessPrompt.request.systemInstruction?.parts[0]?.text,
+  "You are a coding agent helping the user with their project.",
+);
+
+// Stock Pi, Pi-Bolt, and already-sanitized openers all collapse to the neutral opener.
+const openerPromptCases: Array<[string, string]> = [
+  [
+    "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n- read: Read file contents\n",
+    "You are a coding agent helping the user with their project.\n\n<tools>\n- read: Read file contents\n",
+  ],
+  [
+    "You are a coding assistant running inside Pi-Bolt, a build of pi (a coding agent harness) compiled ahead of time. Help users inspect files, run commands, and modify code. Be brief.",
+    "You are a coding agent helping the user with their project. Be brief.",
+  ],
+  [
+    "You are a coding assistant running inside your development environment. Help users inspect files, run commands, and modify code.",
+    "You are a coding agent helping the user with their project.",
+  ],
+];
+for (const [input, expected] of openerPromptCases) {
+  const res = buildRequest(
+    flash37Model,
+    { ...dummyContext, systemPrompt: input },
+    "test-proj",
+    {},
+    "gemini-3.7-flash-low",
+  );
+  const sent = res.request.systemInstruction?.parts[0]?.text ?? res.request.contents[0]?.parts[0]?.text;
+  assert.equal(sent, expected, input);
+}
+
+// Scattered Pi-Bolt phrases are neutralized while filenames like pi-bolt.js stay untouched (#145).
+const piBoltPromptCases: Array<[string, string]> = [
+  [
+    "You are a coding assistant running inside Pi-Bolt. Be brief.",
+    "You are a coding assistant running inside your development environment. Be brief.",
+  ],
+  [
+    "A coding agent inside Pi-Bolt should be concise.",
+    "A coding agent inside your development environment should be concise.",
+  ],
+  [
+    "inside Pi-Bolt, a build of pi (a coding agent harness) compiled ahead of time",
+    "inside your development environment",
+  ],
+  [
+    "You are a coding assistant running inside pi-bolt.js untouched.",
+    "You are a coding assistant running inside pi-bolt.js untouched.",
+  ],
+];
+for (const [input, expected] of piBoltPromptCases) {
+  const res = buildRequest(
+    flash37Model,
+    { ...dummyContext, systemPrompt: input },
+    "test-proj",
+    {},
+    "gemini-3.7-flash-low",
+  );
+  const sent = res.request.systemInstruction?.parts[0]?.text ?? res.request.contents[0]?.parts[0]?.text;
+  assert.equal(sent, expected, input);
+}
+
+// Pi 1.5.2 <docs> codemode phrase is neutralized while keeping `- codemode:`, `CodeModel`, and `docs/codemode.md` intact (#155).
+const codemodeDocsPrompt = buildRequest(
+  flash37Model,
+  {
+    ...dummyContext,
+    systemPrompt:
+      "<tools>\n- codemode: Run JavaScript (CodeModel)\n</tools>\n<docs>\n- When asked about: codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n</docs>",
+  },
+  "test-proj",
+  {},
+  "gemini-3.7-flash-low",
+);
+const codemodeDocsSent =
+  codemodeDocsPrompt.request.systemInstruction?.parts[0]?.text ??
+  codemodeDocsPrompt.request.contents[0]?.parts[0]?.text;
+assert.equal(
+  codemodeDocsSent,
+  "<tools>\n- codemode: Run JavaScript (CodeModel)\n</tools>\n<docs>\n- When asked about: codemode scripts (docs/codemode.md), non-LLM models such as classifiers and image models (docs/codemode.md)\n</docs>",
 );
 
 const shortPiPrompt = buildRequest(
@@ -1572,7 +1750,7 @@ const shortPiPrompt = buildRequest(
   "gemini-3.7-flash-low",
 );
 assert.equal(
-  shortPiPrompt.request.systemInstruction.parts[0]?.text,
+  shortPiPrompt.request.systemInstruction?.parts[0]?.text,
   "You are a coding assistant running inside your development environment. Be brief.",
 );
 
@@ -1587,7 +1765,7 @@ const unrelatedIdentifierPrompt = buildRequest(
   "gemini-3.7-flash-low",
 );
 assert.equal(
-  unrelatedIdentifierPrompt.request.systemInstruction.parts[0]?.text,
+  unrelatedIdentifierPrompt.request.systemInstruction?.parts[0]?.text,
   "Keep files running inside pi.js untouched.",
 );
 
@@ -1603,7 +1781,8 @@ for (const variant of [
     {},
     "gemini-3.7-flash-low",
   );
-  assert.ok(!/inside pi/i.test(res.request.systemInstruction.parts[0]?.text || ""), variant);
+  const sent = res.request.systemInstruction?.parts[0]?.text ?? res.request.contents[0]?.parts[0]?.text;
+  assert.ok(!/inside pi/i.test(sent || ""), variant);
 }
 
 const fallbackSystemPromptReq = buildRequest(
@@ -1613,14 +1792,19 @@ const fallbackSystemPromptReq = buildRequest(
   {},
   "gemini-3.7-flash-low",
 );
+const fallbackSent =
+  fallbackSystemPromptReq.request.systemInstruction?.parts
+    .map((part) => part.text)
+    .join("\n") ??
+  fallbackSystemPromptReq.request.contents[0]?.parts[0]?.text ??
+  "";
 assert.ok(
-  !/tool-aware\./i.test(fallbackSystemPromptReq.request.systemInstruction.parts[0]?.text || ""),
+  !/tool-aware\./i.test(fallbackSent),
   "default ANTIGRAVITY_SYSTEM_INSTRUCTION tail must also be neutralized",
 );
 assert.ok(
-  fallbackSystemPromptReq.request.systemInstruction.parts[0]?.text?.includes(
-    "practical, and tool aware.",
-  ),
+  fallbackSent.includes("practical, and tool aware."),
+  "neutralized fallback persona is still delivered",
 );
 
 // Skill-only turns are injected instructions, not user prompts. The request remains
@@ -1640,6 +1824,15 @@ const skillOnlyRequest = buildRequest(
   "test-proj",
   {},
   "gemini-3.7-flash-low",
+);
+const skillOnlyParts =
+  skillOnlyRequest.request.systemInstruction?.parts ?? skillOnlyRequest.request.contents[0]?.parts;
+assert.ok(skillOnlyParts, "skill-only request carries instructions");
+assert.ok(
+  skillOnlyParts.some((part) =>
+    "text" in part ? part.text.includes('<skill name="smart-commit-grouping">') : false,
+  ),
+  "Skill survives the fold",
 );
 assert.equal(skillOnlyRequest.request.contents.length, 1);
 assert.equal(skillOnlyRequest.request.contents[0]?.role, "user");

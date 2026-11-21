@@ -1,6 +1,6 @@
 {
   "name": "pi-antigravity",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Personal Antigravity / Cloud Code Assist provider for Pi Coding Agent",
   "author": "Rahul Arya",
   "license": "MIT",
@@ -63,24 +63,24 @@
     "@earendil-works/pi-ai": "^1.5.0",
     "@earendil-works/pi-coding-agent": "^1.5.0",
     "@eslint/js": "^10.0.1",
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.6",
     "@types/turndown": "^5.0.6",
-    "eslint": "^10.11.0",
+    "eslint": "^10.14.0",
     "eslint-config-prettier": "^10.1.8",
-    "globals": "^17.7.0",
-    "prettier": "^3.9.8",
-    "typebox": "^1.3.27",
+    "globals": "^17.14.0",
+    "prettier": "^3.9.10",
+    "typebox": "^1.4.6",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.64.0"
+    "typescript-eslint": "^8.72.1"
   },
   "dependencies": {
     "@mixmark-io/domino": "^2.2.0",
-    "turndown": "^7.2.4",
+    "turndown": "^7.2.5",
     "turndown-plugin-gfm": "^1.0.2",
-    "undici": "^8.12.3"
+    "undici": "^8.12.4"
   },
   "resolutions": {
-    "undici": "8.12.3",
+    "undici": "8.12.4",
     "minimatch": "11.0.3"
   }
 }
